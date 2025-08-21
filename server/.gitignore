@@ -1,0 +1,33 @@
+# Environment and secrets
+.env
+.env.*
+
+# Python virtual environments
+env/
+venv/
+.venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+
+# Model and data artifacts
+*.keras
+*.h5
+*.hdf5
+*.ckpt
+*.pb
+*.onnx
+*.tflite
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+*.swp
