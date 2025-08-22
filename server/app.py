@@ -18,6 +18,16 @@ _tf = None
 model = None
 model_input_size = (224, 224)
 
+# Lazy import DeepFace
+_df = None
+
+def _lazy_import_deepface():
+	global _df
+	if _df is None:
+		from deepface import DeepFace  # type: ignore
+		_df = DeepFace
+	return _df
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -119,11 +129,17 @@ def register():
 	name = (data.get("name") or "").strip()
 	email = (data.get("email") or "").strip().lower()
 	password = data.get("password") or ""
+	gender = (data.get("gender") or "").strip().lower()
+	consent = bool(data.get("consent"))
 
 	if not name or not email or not password:
 		return jsonify({"message": "All fields are required"}), 400
 	if len(password) < 6:
 		return jsonify({"message": "Password must be at least 6 characters"}), 400
+	if gender not in ("male", "female", "other"):
+		return jsonify({"message": "Invalid gender"}), 400
+	if not consent:
+		return jsonify({"message": "Consent is required to register"}), 400
 
 	try:
 		if users_col.find_one({"email": email}):
@@ -134,6 +150,9 @@ def register():
 				"name": name,
 				"email": email,
 				"password_hash": password_hash,
+				"gender": gender,
+				"consent": True,
+				"consented_at": datetime.utcnow(),
 				"created_at": datetime.utcnow(),
 			}
 		)
@@ -179,6 +198,14 @@ def predict_age():
 		m = _load_model_once()
 
 		img_arr = _preprocess_image_from_data_url(image_data_url)
+		# Input stats for debugging
+		input_stats = {
+			"min": float(np.min(img_arr)),
+			"max": float(np.max(img_arr)),
+			"mean": float(np.mean(img_arr)),
+			"preprocess": AGE_PREPROCESS,
+			"input_size": list(model_input_size),
+		}
 		batch = np.expand_dims(img_arr, axis=0)  # (1,H,W,C)
 		pred = m.predict(batch, verbose=0)
 
@@ -197,6 +224,7 @@ def predict_age():
 		label = None
 		confidence = None
 		probs_out = None
+		idx_out = None
 		try:
 			# If arr is (1, C) or (C,)
 			if arr.ndim == 2 and arr.shape[0] == 1 and arr.shape[1] >= 2:
@@ -205,12 +233,14 @@ def predict_age():
 				label = AGE_CLASS_LABELS[idx] if idx < len(AGE_CLASS_LABELS) else str(idx)
 				confidence = float(probs[idx])
 				probs_out = probs
+				idx_out = idx
 			elif arr.ndim == 1 and arr.shape[0] >= 2:
 				probs = _softmax(arr)
 				idx = int(np.argmax(probs))
 				label = AGE_CLASS_LABELS[idx] if idx < len(AGE_CLASS_LABELS) else str(idx)
 				confidence = float(probs[idx])
 				probs_out = probs
+				idx_out = idx
 			elif arr.ndim >= 3:
 				# Some TF models output nested lists; try to squeeze
 				vec = np.squeeze(arr)
@@ -220,10 +250,12 @@ def predict_age():
 					label = AGE_CLASS_LABELS[idx] if idx < len(AGE_CLASS_LABELS) else str(idx)
 					confidence = float(probs[idx])
 					probs_out = probs
+					idx_out = idx
 		except Exception:
 			label = None
 			confidence = None
 			probs_out = None
+			idx_out = None
 
 		# Fallback: numeric to buckets if classification parsing failed
 		if label is None:
@@ -251,10 +283,40 @@ def predict_age():
 		if AGE_DEBUG_RESPONSE and probs_out is not None:
 			resp["probs"] = [round(float(p) * 100.0, 2) for p in probs_out]
 			resp["labels"] = AGE_CLASS_LABELS
+			resp["argmax_index"] = idx_out
+			resp["input_stats"] = input_stats
 		return jsonify(resp), 200
 	except Exception as e:
 		app.logger.exception("Prediction error")
 		return jsonify({"message": "Prediction error"}), 500
+
+
+@app.post("/api/age-ai")
+def age_ai():
+	try:
+		payload = request.get_json(silent=True) or {}
+		image_data_url = payload.get("image") or payload.get("dataUrl")
+		if not image_data_url:
+			return jsonify({"message": "Missing image"}), 400
+		if "," in image_data_url:
+			_, b64 = image_data_url.split(",", 1)
+		else:
+			b64 = image_data_url
+		image_bytes = base64.b64decode(b64)
+		img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+		# DeepFace accepts file paths or numpy arrays (BGR). We'll pass RGB np array.
+		img_np = np.array(img)
+		DeepFace = _lazy_import_deepface()
+		# Use actions=['age'] to run only age analysis
+		result = DeepFace.analyze(img_path = img_np, actions = ['age'], enforce_detection = False)
+		# DeepFace returns list or dict depending on version
+		if isinstance(result, list):
+			result = result[0]
+		age_value = result.get('age')
+		return jsonify({"age": age_value}), 200
+	except Exception as e:
+		app.logger.exception("Age-AI prediction error")
+		return jsonify({"message": "Age-AI prediction error"}), 500
 
 
 if __name__ == "__main__":

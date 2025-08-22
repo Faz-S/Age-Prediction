@@ -6,6 +6,8 @@ export default function Register() {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [gender, setGender] = useState('')
+  const [consent, setConsent] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -14,12 +16,16 @@ export default function Register() {
     e.preventDefault()
     setError('')
     setSuccess('')
+    if (!consent) {
+      setError('You must provide consent to access this service.')
+      return
+    }
     setIsLoading(true)
     try {
       const res = await fetch('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password }),
+        body: JSON.stringify({ name, email, password, gender, consent }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.message || 'Registration failed')
@@ -73,6 +79,27 @@ export default function Register() {
                 required
                 minLength={6}
               />
+              <select
+                className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm outline-none focus:border-violet-400"
+                value={gender}
+                onChange={(e) => setGender(e.target.value)}
+                required
+              >
+                <option value="" disabled>Select gender</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="other">Other</option>
+              </select>
+
+              <label className="mt-2 inline-flex items-start gap-3 text-gray-700 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1 size-4 rounded border-gray-300 text-violet-600 focus:ring-violet-500"
+                  checked={consent}
+                  onChange={(e) => setConsent(e.target.checked)}
+                />
+                <span>I consent to the collection and use of my age information for personalized health recommendations.</span>
+              </label>
 
               {error && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
               {success && <div className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{success}</div>}

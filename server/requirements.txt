@@ -6,4 +6,6 @@ PyJWT>=2.9
 python-dotenv>=1.0
 tensorflow>=2.15
 Pillow>=10.0
-numpy>=1.26 
+numpy>=1.26
+deepface>=0.0.95
+opencv-python>=4.10.0.84 

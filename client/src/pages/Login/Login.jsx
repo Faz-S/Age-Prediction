@@ -51,7 +51,7 @@ export default function Login() {
             <form className="max-w-md space-y-3" onSubmit={handleSubmit}>
               <input
                 type="email"
-                placeholder="stanley@gmail.com"
+                placeholder="example@gmail.com"
                 className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm outline-none focus:border-violet-400"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
