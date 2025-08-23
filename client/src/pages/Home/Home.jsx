@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { useNavigate } from 'react-router-dom'
 
 export default function Home() {
 	const videoElementRef = useRef(null)
 	const mediaStreamRef = useRef(null)
+	const navigate = useNavigate()
 	const [hasCaptured, setHasCaptured] = useState(false)
 	const [capturedDataUrl, setCapturedDataUrl] = useState('')
 	const [errorTitle, setErrorTitle] = useState('')
@@ -11,6 +14,7 @@ export default function Home() {
 	const [isPredicting, setIsPredicting] = useState(false)
 	const [predictedLabel, setPredictedLabel] = useState('')
 	const [predictedConfidence, setPredictedConfidence] = useState(null)
+	const [predictedAge, setPredictedAge] = useState(null)
 
 	async function stopCamera() {
 		const stream = mediaStreamRef.current
@@ -30,6 +34,7 @@ export default function Home() {
 		setHasCaptured(false)
 		setPredictedLabel('')
 		setPredictedConfidence(null)
+		setPredictedAge(null)
 		try {
 			if (!('mediaDevices' in navigator)) {
 				setErrorTitle('Camera API not supported')
@@ -78,9 +83,10 @@ export default function Home() {
 		setIsPredicting(true)
 		setPredictedLabel('')
 		setPredictedConfidence(null)
+		setPredictedAge(null)
 		try {
 			const token = localStorage.getItem('token')
-			const res = await fetch('/api/predict-age', {
+			const res = await fetch('/api/age-ai', {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -91,7 +97,19 @@ export default function Home() {
 			const data = await res.json().catch(() => ({}))
 			if (!res.ok) throw new Error(data.message || 'Prediction failed')
 			if (typeof data.label === 'string') setPredictedLabel(data.label)
-			if (typeof data.confidence === 'number') setPredictedConfidence(data.confidence)
+			let ageNum = null
+			if (typeof data.age === 'number' && isFinite(data.age)) {
+				ageNum = data.age
+			} else if (typeof data.label === 'string') {
+				const m = data.label.match(/(\d+)\s*-\s*(\d+)/)
+				if (m) {
+					ageNum = (parseInt(m[1], 10) + parseInt(m[2], 10)) / 2
+				}
+			}
+			if (ageNum != null) {
+				const clamped = Math.max(0, Math.min(100, ageNum))
+				setPredictedAge(clamped)
+			}
 		} catch (e) {
 			setErrorTitle('Prediction error')
 			setErrorHint('Please try again.')
@@ -112,6 +130,7 @@ export default function Home() {
 		setCapturedDataUrl(dataUrl)
 		setHasCaptured(true)
 		await stopCamera()
+		// Removed auto-predict; user will click Predict button to start
 	}
 
 	async function handleUpload(e) {
@@ -136,8 +155,12 @@ export default function Home() {
 		setHasCaptured(false)
 		setPredictedLabel('')
 		setPredictedConfidence(null)
+		setPredictedAge(null)
 		await startCamera()
 	}
+
+	const maxAge = 100
+	const progressPercent = predictedAge != null ? Math.round((predictedAge / maxAge) * 100) : 0
 
 	return (
 		<div className="min-h-dvh bg-white">
@@ -171,10 +194,10 @@ export default function Home() {
 								Retake
 							</button>
 						)}
-						<label className="rounded-xl border border-gray-300 px-5 py-3 font-semibold text-gray-800 hover:bg-gray-50 cursor-pointer">
+						{/* <label className="rounded-xl border border-gray-300 px-5 py-3 font-semibold text-gray-800 hover:bg-gray-50 cursor-pointer">
 							<input type="file" accept="image/*" className="hidden" onChange={handleUpload} />
 							Upload Image
-						</label>
+						</label> */}
 						<button onClick={handlePredict} className="rounded-xl bg-violet-700 px-5 py-3 font-semibold text-white hover:bg-violet-800 disabled:opacity-50" disabled={!capturedDataUrl || isPredicting}>
 							Predict
 						</button>
@@ -186,9 +209,55 @@ export default function Home() {
 					</div>
 
 					{hasCaptured && (
-						<div className="rounded-md bg-emerald-50 px-4 py-2 text-emerald-700 text-sm">
-							{predictedLabel ? `Predicted: ${predictedLabel}${predictedConfidence != null ? ` (${predictedConfidence}%)` : ''}` : 'Image captured'}
+						<div className="w-full max-w-xl">
+							<AnimatePresence mode="wait">
+								{predictedAge != null ? (
+									<motion.div
+										key="age-bar"
+										initial={{ opacity: 0, y: 8 }}
+										animate={{ opacity: 1, y: 0 }}
+										exit={{ opacity: 0, y: -8 }}
+										transition={{ duration: 0.25 }}
+										className="mt-3"
+									>
+										<div className="mb-1 flex items-end justify-between">
+											<p className="text-sm font-medium text-gray-800">Estimated age</p>
+											<p className="text-sm tabular-nums text-gray-600">{Math.round(predictedAge)} yrs{predictedLabel ? ` • ${predictedLabel}` : ''}</p>
+										</div>
+										<div className="h-3 w-full overflow-hidden rounded-full bg-gray-200">
+											<motion.div
+												className="h-full rounded-full bg-violet-700"
+												initial={{ width: 0 }}
+												animate={{ width: `${progressPercent}%` }}
+												transition={{ duration: 1.2, ease: 'easeOut' }}
+											/>
+										</div>
+										<div className="mt-1 flex justify-between text-[10px] text-gray-500">
+											<span>0</span>
+											<span>25</span>
+											<span>50</span>
+											<span>75</span>
+											<span>100</span>
+										</div>
+									</motion.div>
+								) : (
+									<div className="rounded-md bg-emerald-50 px-4 py-2 text-emerald-700 text-sm">Image captured</div>
+								)}
+							</AnimatePresence>
 						</div>
+					)}
+
+					{/* Chatbot Navigation Button */}
+					{predictedAge != null && (
+						<motion.button
+							initial={{ opacity: 0, scale: 0.9 }}
+							animate={{ opacity: 1, scale: 1 }}
+							transition={{ delay: 0.5, duration: 0.3 }}
+							onClick={() => navigate('/chatbot', { state: { predictedAge: predictedAge } })}
+							className="mt-4 rounded-xl bg-blue-600 px-6 py-3 font-semibold text-white hover:bg-blue-700 transition-colors"
+						>
+							💬 Continue to Health Chatbot
+						</motion.button>
 					)}
 				</div>
 			</div>

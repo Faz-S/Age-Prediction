@@ -3,6 +3,7 @@ import Login from './pages/Login/Login'
 import Register from './pages/Register/Register'
 import Home from './pages/Home/Home'
 import AgeAI from './pages/AgeAI/AgeAI'
+import Chatbot from './pages/Chatbot/Chatbot'
 
 function App() {
   return (
@@ -11,6 +12,7 @@ function App() {
       <Route path="/register" element={<Register />} />
       <Route path="/home" element={<Home />} />
       <Route path="/age-ai" element={<AgeAI />} />
+      <Route path="/chatbot" element={<Chatbot />} />
     </Routes>
   )
 }
