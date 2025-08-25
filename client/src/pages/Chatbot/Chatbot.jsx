@@ -1,10 +1,14 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import config from '../../config.js'
+import ChatBg from '../../assets/back.png'
+import BoyBg from '../../assets/boy.png'
+import ParentsBg from '../../assets/parents.png'
 
 export default function Chatbot() {
 	const location = useLocation()
+    const navigate = useNavigate()
 	const [messages, setMessages] = useState([])
 	const [inputValue, setInputValue] = useState('')
 	const [isTyping, setIsTyping] = useState(false)
@@ -12,15 +16,31 @@ export default function Chatbot() {
 	const [facialFeaturesStored, setFacialFeaturesStored] = useState(false)
 	const [messagesEndRef, setMessagesEndRef] = useState(null)
 	const [inputRef, setInputRef] = useState(null)
+	const mainRef = useRef(null)
 	const [predictedAge, setPredictedAge] = useState(null)
 	const [ageGroup, setAgeGroup] = useState('')
-	const [showTopicsModal, setShowTopicsModal] = useState(false)
+  const [userGender, setUserGender] = useState(null)
+  const [loginIsParent, setLoginIsParent] = useState(null)
+
+	const [isParent, setIsParent] = useState(false)
+	const [parentingMode, setParentingMode] = useState(false)
+	const [showParentingQuestion, setShowParentingQuestion] = useState(false)
 
 	// Get predicted age from navigation state
 	useEffect(() => {
+    // read gender/parent flags from login (state or localStorage)
+    try {
+      const g = (location.state?.gender || localStorage.getItem('gender') || localStorage.getItem('userGender') || '').toString().toLowerCase()
+      setUserGender(g || null)
+      const parentFromState = typeof location.state?.isParent !== 'undefined' ? !!location.state.isParent : null
+      const parentFromStorage = (() => { try { return JSON.parse(localStorage.getItem('isParent') || 'false') } catch { return false } })()
+      setLoginIsParent(parentFromState !== null ? parentFromState : parentFromStorage)
+    } catch {}
+
 		if (location.state?.predictedAge) {
 			const age = location.state.predictedAge
 			setPredictedAge(age)
+			try { localStorage.setItem('predictedAge', String(Math.round(age))) } catch {}
 			
 			// Determine age group for appropriate responses
 			if (age < 13) {
@@ -34,7 +54,7 @@ export default function Chatbot() {
 			}
 
 			// Add age-specific welcome message
-			let welcomeMessage = "";
+            let welcomeMessage = "";
 			if (age < 13) {
 				welcomeMessage = `Hi there! I've analyzed your facial features and can see you're ${Math.round(age)} years old. Based on your facial development, I'll give you personalized health advice perfect for building healthy habits early!`;
 			} else if (age < 18) {
@@ -47,6 +67,15 @@ export default function Chatbot() {
 				welcomeMessage = `Greetings! My facial analysis reveals you're ${Math.round(age)} years young with mature facial features. I'll focus on maintaining mobility and cognitive health!`;
 			}
 
+			// Check if user is above 25 to ask about parenting (only once)
+            try {
+                const asked = localStorage.getItem('askedParentingOnce') === 'true'
+                if (age > 25 && !asked) {
+                    setShowParentingQuestion(true)
+                    localStorage.setItem('askedParentingOnce', 'true')
+                }
+            } catch {}
+
 			setMessages([{
 				id: 1,
 				type: 'ai',
@@ -55,6 +84,27 @@ export default function Chatbot() {
 			}])
 		} else {
 			// Show loading message if no age detected
+			try {
+				const stored = localStorage.getItem('predictedAge')
+				if (stored) {
+					const age = Number(stored)
+					if (!isNaN(age)) {
+						setPredictedAge(age)
+						if (age < 13) setAgeGroup('child')
+						else if (age < 18) setAgeGroup('teen')
+						else if (age < 65) setAgeGroup('adult')
+						else setAgeGroup('senior')
+						// Ask parenting only once if age > 25
+                        try {
+                            const asked = localStorage.getItem('askedParentingOnce') === 'true'
+                            if (age > 25 && !asked) {
+                                setShowParentingQuestion(true)
+                                localStorage.setItem('askedParentingOnce', 'true')
+                            }
+                        } catch {}
+					}
+				}
+			} catch {}
 			setMessages([{
 				id: 1,
 				type: 'ai',
@@ -64,22 +114,68 @@ export default function Chatbot() {
 		}
 	}, [location.state])
 
+	const confirmParenting = (isYes) => {
+		if (isYes) {
+			setIsParent(true)
+			setParentingMode(true)
+			setShowParentingQuestion(false)
+			try { localStorage.setItem('isParent', 'true') } catch {}
+			const parentingMessage = {
+				id: Date.now(),
+				type: 'ai',
+				content: `Wonderful! I'm now switching to parenting mode to help you with your child's development. I can provide guidance on:\n\n• Nutrition and feeding (breastfeeding, solid foods, healthy eating)\n• Physical development and milestones\n• Sleep routines and schedules\n• Screen time management\n• Physical activities and play\n• Safety and childproofing\n• Behavioral guidance\n• Health and wellness tips\n\nWhat would you like to know about raising your child?`,
+				timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+			}
+			setMessages(prev => [...prev, parentingMessage])
+		} else {
+			setIsParent(false)
+			setParentingMode(false)
+			setShowParentingQuestion(false)
+			try { localStorage.setItem('isParent', 'false') } catch {}
+			const regularMessage = {
+				id: Date.now(),
+				type: 'ai',
+				content: `Got it! I'll continue providing you with personalized health guidance based on your age and facial analysis. What health topic would you like to discuss today?`,
+				timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+			}
+			setMessages(prev => [...prev, regularMessage])
+		}
+	}
+
 	const scrollToBottom = () => {
-		messagesEndRef?.scrollIntoView({ behavior: 'smooth' })
+		if (mainRef.current) {
+			mainRef.current.scrollTo({ top: mainRef.current.scrollHeight, behavior: 'smooth' });
+		}
 	}
 
 	useEffect(() => {
 		scrollToBottom()
 	}, [messages])
 
-	const callHealthChatAPI = async (message, age, ageGroup, conversationHistory) => {
+	// Auto-scroll when typing starts to show typing indicator
+	useEffect(() => {
+		if (isTyping) {
+			// Initial scroll when typing starts
+			setTimeout(() => scrollToBottom(), 100)
+			
+			// Continuous scrolling while AI is generating
+			const scrollInterval = setInterval(() => {
+				scrollToBottom()
+			}, 100) // Scroll every 100ms while typing
+			
+			return () => clearInterval(scrollInterval)
+		}
+	}, [isTyping])
+
+	const callHealthChatAPI = async (message, age, ageGroup, conversationHistory, parentingMode = false) => {
 		try {
 			const token = localStorage.getItem('token')
 			const requestBody = {
 				message: message,
 				age: age,
 				ageGroup: ageGroup,
-				conversationHistory: conversationHistory.slice(-5) // Send last 5 exchanges
+				conversationHistory: conversationHistory.slice(-5), // Send last 5 exchanges
+				parentingMode: parentingMode
 			}
 			
 			console.log('Sending request to /api/health-chat:', requestBody)
@@ -132,12 +228,35 @@ export default function Chatbot() {
 
 		setMessages(prev => [...prev, userMessage])
 		setInputValue('')
-		setIsTyping(true)
+				setIsTyping(true)
 		setTypingText('')
+
+		// Auto-scroll to show the new user message and typing indicator
+		setTimeout(() => scrollToBottom(), 50)
+
+		// Handle parenting question if it's shown
+		if (showParentingQuestion) {
+            const normalized = inputValue.trim().toLowerCase()
+            if (normalized === 'yes') {
+                confirmParenting(true)
+            } else if (normalized === 'no') {
+                confirmParenting(false)
+            } else {
+                const invalidResponseMessage = {
+                    id: Date.now(),
+                    type: 'ai',
+                    content: "Please respond with either 'yes' or 'no'.",
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                }
+                setMessages(prev => [...prev, invalidResponseMessage])
+            }
+            setIsTyping(false)
+            return
+        }
 
 		try {
 			// Call backend health chat API with conversation history
-			const aiResponseText = await callHealthChatAPI(userMessage.content, predictedAge, ageGroup, messages)
+			const aiResponseText = await callHealthChatAPI(userMessage.content, predictedAge, ageGroup, messages, parentingMode)
 			
 			// Add to conversation history for topic tracking
 			addToConversationHistory(userMessage.content, aiResponseText);
@@ -155,6 +274,9 @@ export default function Chatbot() {
 				setMessages(prev => [...prev, aiResponse])
 				setIsTyping(false)
 				setTypingText('')
+				
+				// Auto-scroll to show the complete AI response
+				setTimeout(() => scrollToBottom(), 50)
 			})
 		} catch (error) {
 			// Fallback response if API fails
@@ -170,7 +292,7 @@ export default function Chatbot() {
 	}
 
 	const handleKeyPress = (e) => {
-		if (e.key === 'Enter' && !e.shiftKey) {
+		if (e.key === 'Enter' && !e.shiftKey && !isTyping && !showParentingQuestion) {
 			e.preventDefault()
 			handleSendMessage()
 		}
@@ -250,172 +372,129 @@ export default function Chatbot() {
 		typeNextChar();
 	};
 
-	// Track conversation topics to avoid repetition
+	// Track conversation history to avoid repetition
 	const [conversationHistory, setConversationHistory] = useState([]);
-	const [conversationTopics, setConversationTopics] = useState(new Set());
 	
 	// Add conversation tracking to avoid repetitive responses
 	const addToConversationHistory = (message, response) => {
 		const newExchange = { message, response, timestamp: Date.now() };
 		setConversationHistory(prev => [...prev.slice(-10), newExchange]);
-		
-		// Extract key topics from the exchange
-		const messageWords = message.toLowerCase().split(/\s+/);
-		const responseWords = response.toLowerCase().split(/\s+/);
-		const allWords = [...messageWords, ...responseWords];
-		
-		// Add health-related keywords to topics
-		const healthKeywords = ['exercise', 'diet', 'sleep', 'stress', 'nutrition', 'fitness', 'mental', 'physical', 'health', 'wellness', 'symptoms', 'pain', 'medicine', 'doctor', 'treatment'];
-		const newTopics = allWords.filter(word => healthKeywords.some(keyword => word.includes(keyword)));
-		
-		setConversationTopics(prev => new Set([...prev, ...newTopics]));
-	};
-	
-	// Check if a topic has been discussed recently
-	const isTopicRecent = (message) => {
-		const messageLower = message.toLowerCase();
-		return Array.from(conversationTopics).some(topic => messageLower.includes(topic));
 	};
 
-	// Handle escape key to close modal
-	useEffect(() => {
-		const handleEscape = (e) => {
-			if (e.key === 'Escape' && showTopicsModal) {
-				setShowTopicsModal(false);
+	// Function to handle parenting question response
+	const handleParentingResponse = (response) => {
+        if (response.toLowerCase().includes('yes') || response.toLowerCase().includes('parent') || response.toLowerCase().includes('child') || response.toLowerCase().includes('kid')) {
+            setIsParent(true)
+            setParentingMode(true)
+            setShowParentingQuestion(false)
+            try { localStorage.setItem('isParent', 'true') } catch {}
+                    
+            // Add parenting mode welcome message
+            const parentingMessage = {
+                id: Date.now(),
+                type: 'ai',
+				content: `Wonderful! I'm now switching to parenting mode to help you with your child's development. I can provide guidance on:\n\n• Nutrition and feeding (breastfeeding, solid foods, healthy eating)\n• Physical development and milestones\n• Sleep routines and schedules\n• Screen time management\n• Physical activities and play\n• Safety and childproofing\n• Behavioral guidance\n• Health and wellness tips\n\nWhat would you like to know about raising your child?`,
+				timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 			}
-		};
-
-		if (showTopicsModal) {
-			document.addEventListener('keydown', handleEscape);
-			// Prevent body scroll when modal is open
-			document.body.style.overflow = 'hidden';
+			setMessages(prev => [...prev, parentingMessage])
+		        } else {
+            setIsParent(false)
+            setParentingMode(false)
+            setShowParentingQuestion(false)
+            try { localStorage.setItem('isParent', 'false') } catch {}
+            
+            // Continue with regular health guidance
+            const regularMessage = {
+                id: Date.now(),
+                type: 'ai',
+				content: `Got it! I'll continue providing you with personalized health guidance based on your age and facial analysis. What health topic would you like to discuss today?`,
+				timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+			}
+			setMessages(prev => [...prev, regularMessage])
 		}
+	}
 
-		return () => {
-			document.removeEventListener('keydown', handleEscape);
-			document.body.style.overflow = 'unset';
-		};
-	}, [showTopicsModal]);
+	// Function to check if message is about parenting
+	const isParentingRelated = (message) => {
+		const parentingKeywords = ['child', 'kid', 'baby', 'toddler', 'infant', 'parent', 'parenting', 'breastfeed', 'feeding', 'diaper', 'sleep', 'cry', 'play', 'milestone', 'development', 'screen time', 'activity', 'safety', 'childproof'];
+		const messageLower = message.toLowerCase();
+		return parentingKeywords.some(keyword => messageLower.includes(keyword));
+	}
 
-	// Topics Modal Component
-	const TopicsModal = () => {
-		if (!showTopicsModal) return null;
 
-		const topics = Array.from(conversationTopics);
-		
-		return (
-			<motion.div
-				initial={{ opacity: 0 }}
-				animate={{ opacity: 1 }}
-				exit={{ opacity: 0 }}
-				className="fixed inset-0 bg-gray-900 bg-opacity-30 flex items-center justify-center z-50 p-4 backdrop-blur-sm"
-				onClick={() => setShowTopicsModal(false)}
-			>
-				<motion.div
-					initial={{ scale: 0.9, y: 20, opacity: 0 }}
-					animate={{ scale: 1, y: 0, opacity: 1 }}
-					exit={{ scale: 0.9, y: 20, opacity: 0 }}
-					transition={{ 
-						type: "spring", 
-						stiffness: 300, 
-						damping: 30 
-					}}
-					className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[80vh] overflow-hidden border border-gray-200 ring-4 ring-white/20"
-					onClick={(e) => e.stopPropagation()}
-				>
-					{/* Header */}
-					<div className="bg-gradient-to-r from-blue-500 to-purple-600 text-white p-6 relative overflow-hidden">
-						{/* Background decoration */}
-						<div className="absolute top-0 right-0 w-32 h-32 bg-white opacity-10 rounded-full -translate-y-16 translate-x-16"></div>
-						<div className="absolute bottom-0 left-0 w-24 h-24 bg-white opacity-10 rounded-full translate-y-12 -translate-x-12"></div>
-						
-						<div className="relative z-10">
-							<div className="flex items-center justify-between">
-								<h3 className="text-xl font-bold">Conversation Topics</h3>
-								<button
-									onClick={() => setShowTopicsModal(false)}
-									className="text-white hover:text-gray-200 transition-colors p-1 hover:bg-white hover:bg-opacity-20 rounded-full"
-								>
-									<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-									</svg>
-								</button>
-							</div>
-							<p className="text-blue-100 mt-2">Health topics we've discussed</p>
-						</div>
-					</div>
 
-					{/* Content */}
-					<div className="p-6">
-						{topics.length > 0 ? (
-							<div className="space-y-3">
-								{topics.map((topic, index) => (
-									<motion.div
-										key={index}
-										initial={{ opacity: 0, x: -20 }}
-										animate={{ opacity: 1, x: 0 }}
-										transition={{ delay: index * 0.1, duration: 0.3 }}
-										className="flex items-center space-x-3 p-3 bg-gradient-to-r from-gray-50 to-gray-100 rounded-lg hover:from-blue-50 hover:to-blue-100 transition-all duration-200 border border-gray-200 hover:border-blue-300 hover:shadow-md"
-									>
-										<div className="w-3 h-3 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full animate-pulse"></div>
-										<span className="text-gray-700 font-medium capitalize">{topic}</span>
-									</motion.div>
-								))}
-							</div>
-						) : (
-							<motion.div 
-								initial={{ opacity: 0, scale: 0.9 }}
-								animate={{ opacity: 1, scale: 1 }}
-								transition={{ delay: 0.2 }}
-								className="text-center py-8"
-							>
-								<div className="text-gray-400 text-6xl mb-4 animate-bounce">💬</div>
-								<p className="text-gray-500 text-lg">No specific topics discussed yet</p>
-								<p className="text-gray-400 text-sm mt-2">Start a conversation to see topics here</p>
-							</motion.div>
-						)}
-					</div>
 
-					{/* Footer */}
-					<div className="border-t border-gray-200 p-4 bg-gray-50">
-						<button
-							onClick={() => setShowTopicsModal(false)}
-							className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-medium py-3 px-4 rounded-lg transition-all duration-200 transform hover:scale-105 hover:shadow-lg"
-						>
-							Close
-						</button>
-					</div>
-				</motion.div>
-			</motion.div>
-		);
-	};
 
 	return (
-		<div className="min-h-screen bg-white flex flex-col">
+		<div className="h-screen bg-white flex flex-col"
+			style={{
+				backgroundImage: `url(${(loginIsParent || parentingMode || isParent) ? ParentsBg : ((userGender === 'female' || userGender === 'woman' || userGender === 'girl') ? ChatBg : BoyBg)})`,
+				backgroundRepeat: 'no-repeat',
+				backgroundPosition: 'center',
+				backgroundSize: '280px',
+				
+			}}
+		>
 			{/* Header */}
-			<header className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+			<header className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
 				<div className="flex items-center space-x-3">
 					<div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
 						<div className="w-4 h-4 bg-white rounded-sm"></div>
 					</div>
 					<div>
-						<h1 className="text-xl font-semibold text-gray-900">Ager</h1>
+						<h1 className="text-xl font-semibold text-gray-900">AgeWise</h1>
 						<p className="text-xs text-gray-500">Health AI Assistant </p>
 					</div>
 				</div>
 				
 									<div className="flex items-center space-x-2">
-						{/* Reset Conversation Button */}
+						{/* Mode Toggle Button */}
+						{predictedAge > 25 && (
+							<button 
+								onClick={() => {
+									if (parentingMode) {
+										setParentingMode(false);
+										setIsParent(false);
+										const modeSwitchMessage = {
+											id: Date.now(),
+											type: 'ai',
+											content: "I've switched back to health mode. I'll now provide you with personalized health guidance based on your age and facial analysis. What health topic would you like to discuss?",
+											timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+										};
+										setMessages(prev => [...prev, modeSwitchMessage]);
+									} else {
+										setParentingMode(true);
+										setIsParent(true);
+										const modeSwitchMessage = {
+											id: Date.now(),
+											type: 'ai',
+											content: "I've switched to parenting mode! I can now help you with child development, nutrition, activities, safety, and parenting challenges. What would you like to know about raising your child?",
+											timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+										};
+										setMessages(prev => [...prev, modeSwitchMessage]);
+									}
+								}}
+								className={`px-3 py-1 text-xs rounded-lg transition-colors ${
+									parentingMode 
+										? 'bg-pink-100 hover:bg-pink-200 text-pink-600 border border-pink-200' 
+										: 'bg-blue-100 hover:bg-blue-200 text-blue-600 border border-blue-200'
+								}`}
+								title={parentingMode ? "Switch to Health Mode" : "Switch to Parenting Mode"}
+							>
+								{parentingMode ? '👶 Parenting' : '🏥 Health'}
+							</button>
+						)}
+
+						{/* Wellness Navigation Button */}
 						<button 
-							onClick={() => {
-								setMessages(prev => prev.slice(0, 1)); // Keep only welcome message
-								setConversationHistory([]);
-								setConversationTopics(new Set());
-							}}
-							className="px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg transition-colors"
-							title="Start fresh conversation"
+							onClick={() => navigate('/wellness', { state: { age: predictedAge } })}
+							disabled={!predictedAge}
+							className={`px-3 py-1 text-xs rounded-lg transition-colors border ${
+								predictedAge ? 'bg-green-100 hover:bg-green-200 text-green-600 border-green-200' : 'bg-gray-200 text-gray-500 border-gray-300 cursor-not-allowed'
+							}`}
+							title="View age-based wellness insights"
 						>
-							🔄 Reset Chat
+							💡 Wellness
 						</button>
 					</div>
 				{predictedAge && (
@@ -424,11 +503,12 @@ export default function Chatbot() {
 						<p className="text-xs text-gray-500">{ageGroup === 'child' ? 'Child' : ageGroup === 'teen' ? 'Teen' : ageGroup === 'adult' ? 'Adult' : 'Senior'}</p>
 						{/* Age-specific health focus indicator */}
 						<div className="mt-1">
-							{predictedAge < 13 && <span className="inline-block bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full">Building Healthy Habits</span>}
-							{predictedAge >= 13 && predictedAge < 18 && <span className="inline-block bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">Growth & Development</span>}
-							{predictedAge >= 18 && predictedAge < 30 && <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-1 rounded-full">Establishing Routines</span>}
-							{predictedAge >= 30 && predictedAge < 50 && <span className="inline-block bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full">Maintaining Health</span>}
-							{predictedAge >= 50 && <span className="inline-block bg-red-100 text-red-800 text-xs px-2 py-1 rounded-full">Wellness & Prevention</span>}
+							{parentingMode && <span className="inline-block bg-pink-100 text-pink-800 text-xs px-2 py-1 rounded-full animate-pulse">👶 Parenting Mode</span>}
+							{!parentingMode && predictedAge < 13 && <span className="inline-block bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full">Building Healthy Habits</span>}
+							{!parentingMode && predictedAge >= 13 && predictedAge < 18 && <span className="inline-block bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">Growth & Development</span>}
+							{!parentingMode && predictedAge >= 18 && predictedAge < 30 && <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-1 rounded-full">Establishing Routines</span>}
+							{!parentingMode && predictedAge >= 30 && predictedAge < 50 && <span className="inline-block bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full">Maintaining Health</span>}
+							{!parentingMode && predictedAge >= 50 && <span className="inline-block bg-red-100 text-red-800 text-xs px-2 py-1 rounded-full">Wellness & Prevention</span>}
 						</div>
 						{/* Facial Analysis Indicator */}
 						<div className="mt-2">
@@ -441,7 +521,7 @@ export default function Chatbot() {
 			</header>
 
 			{/* Main Chat Area */}
-			<main className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+			<main ref={mainRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-6 relative z-0">
 				<AnimatePresence>
 					{messages.map((message) => (
 						<motion.div
@@ -475,17 +555,61 @@ export default function Chatbot() {
 					))}
 				</AnimatePresence>
 
+				{/* Parenting Question */}
+				{showParentingQuestion && (
+					<motion.div
+						initial={{ opacity: 0, y: 20 }}
+						animate={{ opacity: 1, y: 0 }}
+						className="flex justify-start relative z-20"
+					>
+						<div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center mr-3">
+							<div className="w-4 h-4 bg-white rounded-sm"></div>
+						</div>
+						<div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-2xl px-6 py-4 max-w-[80%] border border-blue-200 shadow-lg">
+							<div className="flex items-center space-x-3 mb-3">
+								<span className="text-2xl">👶</span>
+								<h3 className="text-lg font-semibold text-gray-800">Parenting Question</h3>
+							</div>
+							<p className="text-gray-700 mb-4">
+								Since you're above 25, I'd like to know: <strong>Are you a parent or caregiver for a child?</strong>
+							</p>
+							<p className="text-sm text-gray-600 mb-4">
+								If yes, I can switch to parenting mode and provide specialized guidance on child development, nutrition, activities, and more!
+							</p>
+							<div className="bg-blue-100 rounded-lg p-3 border border-blue-200">
+								<p className="text-sm text-blue-800 font-medium">
+									💡 <strong>Parenting Mode includes:</strong> Child nutrition, development milestones, sleep routines, screen time management, physical activities, safety tips, and behavioral guidance.
+								</p>
+							</div>
+							<div className="flex items-center gap-3 mt-4">
+								<button
+									onClick={() => confirmParenting(true)}
+									className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-pink-600 text-white text-sm hover:bg-pink-700"
+								>
+									Yes, I am a parent
+								</button>
+								<button
+									onClick={() => confirmParenting(false)}
+									className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800 text-white text-sm hover:bg-gray-900"
+								>
+									No, continue normal mode
+								</button>
+							</div>
+						</div>
+					</motion.div>
+				)}
+
 				{/* Typing Indicator */}
 				{isTyping && (
 					<motion.div
 						initial={{ opacity: 0, y: 20 }}
 						animate={{ opacity: 1, y: 0 }}
-						className="flex justify-start"
+						className="flex justify-start relative z-20"
 					>
 						<div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center mr-3">
 							<div className="w-4 h-4 bg-white rounded-sm"></div>
 						</div>
-						<div className="bg-gray-100 rounded-2xl px-4 py-3 max-w-[70%]">
+						<div className="bg-gray-100 rounded-2xl px-4 py-3 max-w-[70%] shadow-lg">
 							<p className="text-sm text-gray-700">
 								{typingText}
 								<span className="inline-block w-2 h-4 bg-blue-500 ml-1 animate-pulse"></span>
@@ -495,102 +619,80 @@ export default function Chatbot() {
 				)}
 
 				<div ref={setMessagesEndRef} />
+				
+				{/* Bottom spacing to ensure last message is visible above input */}
+				<div className="h-6"></div>
 			</main>
 
-			{/* Topic Repetition Warning */}
-			{inputValue.trim() && isTopicRecent(inputValue) && (
-				<div className="px-6 py-2">
-					<div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-						<div className="flex items-center space-x-2">
-							<span className="text-yellow-600">⚠️</span>
-							<p className="text-sm text-yellow-800">
-								<strong>Topic reminder:</strong> This health topic was discussed recently. I'll provide fresh insights and avoid repetition.
-							</p>
-						</div>
-					</div>
-				</div>
-			)}
+
 
 			{/* Input Area - Fixed at bottom */}
-			<footer className="border-t border-gray-200 px-6 py-4 mt-auto">
-				<div className="flex items-center space-x-3">
-					{/* Left Icons */}
-					<button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-						<span className="text-gray-600 text-lg">🏥</span>
-					</button>
-					<button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-						<span className="text-gray-600 text-lg">💊</span>
-					</button>
-					<button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-						<span className="text-gray-600 text-lg">🏃</span>
-					</button>
-
-					{/* Input Field */}
-					<div className="flex-1 relative">
+			<footer className="bg-white border-t border-gray-200 px-6 py-4 shadow-lg flex-shrink-0">
+				{/* Centered Input Field */}
+				<div className="max-w-2xl mx-auto">
+					{/* AI Typing Indicator */}
+					{isTyping && (
+						<div className="text-center mb-3">
+							<div className="inline-flex items-center gap-2 px-3 py-1 bg-blue-50 text-blue-600 text-sm rounded-full border border-blue-200">
+								<div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+								AI is typing...
+							</div>
+						</div>
+					)}
+					
+					<div className="relative">
 						<input
 							ref={setInputRef}
 							type="text"
 							value={inputValue}
 							onChange={(e) => setInputValue(e.target.value)}
 							onKeyPress={handleKeyPress}
-							placeholder="Ask me about health, exercise, nutrition, or wellness..."
-							className="w-full px-4 py-3 bg-gray-100 rounded-xl border-0 focus:ring-2 focus:ring-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
+							disabled={isTyping || showParentingQuestion}
+							placeholder={
+								isTyping
+									? "AI is generating response..."
+									: showParentingQuestion
+										? "Please choose Yes or No above"
+										: (parentingMode
+											? "Ask me about parenting, child development, nutrition, activities..."
+											: "Ask me about health, exercise, nutrition, or wellness...")
+							}
+							className={`w-full px-6 py-4 rounded-2xl border-0 focus:ring-2 focus:ring-blue-500 focus:outline-none text-base shadow-sm hover:shadow-md transition-all duration-200 ${
+								(isTyping || showParentingQuestion)
+									? 'bg-gray-200 text-gray-500 cursor-not-allowed ring-1 ring-gray-300' 
+									: 'bg-gray-100 text-gray-900'
+							}`}
 						/>
+						{/* Send Button */}
+						<button
+							onClick={handleSendMessage}
+							disabled={!inputValue.trim() || isTyping || showParentingQuestion}
+							className={`absolute right-2 top-1/2 transform -translate-y-1/2 p-2 rounded-xl transition-all duration-200 ${
+								(isTyping || showParentingQuestion)
+									? 'bg-gray-400 text-gray-500 cursor-not-allowed'
+									: inputValue.trim()
+										? 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-105'
+										: 'bg-gray-300 text-gray-500 cursor-not-allowed'
+							}`}
+						>
+							<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-1" />
+							</svg>
+						</button>
 					</div>
-
-					{/* Right Icons */}
-					<button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-						<span className="text-gray-600 text-lg">📋</span>
-					</button>
-					<button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-						<span className="text-gray-600 text-lg">ℹ️</span>
-					</button>
 				</div>
 
-				{/* Topics Button - Moved here to avoid overlap */}
-				<div className="flex justify-center mt-3">
-					<button 
-						onClick={() => setShowTopicsModal(true)}
-						disabled={isTyping || typingText.length > 0}
-						className={`relative px-4 py-2 text-sm rounded-lg transition-all duration-200 border ${
-							isTyping || typingText.length > 0
-								? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200 animate-pulse'
-								: 'bg-blue-100 hover:bg-blue-200 text-blue-600 hover:shadow-md border-blue-200'
-						}`}
-						title={isTyping || typingText.length > 0 ? "Wait for AI to finish typing" : "View conversation topics"}
-					>
-						{isTyping || typingText.length > 0 ? (
-							<>
-								<span className="inline-block w-4 h-4 mr-2">
-									<div className="animate-spin rounded-full h-4 w-4 border-2 border-gray-400 border-t-transparent"></div>
-								</span>
-								AI Typing...
-							</>
-						) : (
-							<>📋 Topics Covered</>
-						)}
-						{conversationTopics.size > 0 && (
-							<span className={`absolute -top-1 -right-1 text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold ${
-								isTyping || typingText.length > 0 ? 'bg-gray-400' : 'bg-red-500'
-							} text-white`}>
-								{conversationTopics.size}
-							</span>
-						)}
-					</button>
-				</div>
+
 
 				{/* Footer Disclaimer */}
-				<div className="text-center mt-4">
-					<p className="text-xs text-gray-500">
-						Ager provides general health information only. Always consult healthcare professionals for medical advice. Not a substitute for professional medical care.
+				<div className="text-center mt-6">
+					<p className="text-xs text-gray-400 max-w-md mx-auto">
+						Ager provides general health information only. Always consult healthcare professionals for medical advice.
 					</p>
 				</div>
 			</footer>
 			
-			{/* Topics Modal */}
-			<AnimatePresence>
-				<TopicsModal />
-			</AnimatePresence>
+
 		</div>
 	)
 }

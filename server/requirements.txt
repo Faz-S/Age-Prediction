@@ -10,4 +10,6 @@ numpy>=1.26
 deepface>=0.0.95
 
 requests>=2.31
+librosa>=0.10.0
+soundfile>=0.12.0
  

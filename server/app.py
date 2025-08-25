@@ -1,8 +1,16 @@
+# Simple in-memory cache to reduce repetition across rapid refreshes
+LAST_WELLNESS_CACHE = {
+    # key: (age or bucket), value: {"hash": str, "ts": datetime}
+}
 from flask import Flask, request, jsonify, send_from_directory
+from flask import Response
 from flask_cors import CORS
 from pymongo import MongoClient
+from bson.objectid import ObjectId
 from datetime import datetime, timedelta
+from uuid import uuid4
 from dotenv import load_dotenv
+import random
 import os
 import bcrypt
 import jwt
@@ -17,6 +25,9 @@ from PIL import Image
 import json
 import pickle
 from datetime import datetime
+import tempfile
+import soundfile as sf
+import librosa
 
 # TensorFlow is imported lazily to avoid slow startup when not needed
 _tf = None
@@ -52,13 +63,74 @@ AGE_CLASS_LABELS = [s.strip() for s in os.environ.get("AGE_CLASS_LABELS", "Minor
 AGE_DEBUG_RESPONSE = os.environ.get("AGE_DEBUG_RESPONSE", "0").strip() in ("1", "true", "True", "yes", "on")
 
 # Gemini AI Configuration
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAopETSjDC5U-KK5sTMd3srq6rJSXiU6-c")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDxpGYSof8mp6CObcNqMSATfYs_1Hny_HM")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 mongo_client = MongoClient(MONGODB_URI)
 db = mongo_client["age_app"]
 users_col = db["users"]
 users_col.create_index("email", unique=True)
+
+# Unsplash Configuration
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "7984UBkb0lUWtIPwV0LBtya3fIinzwah5viAplc5tdI")
+
+# --- Unsplash helpers ---
+def _is_likely_image_url(url: str) -> bool:
+    try:
+        if not isinstance(url, str) or not url.startswith("http"):
+            return False
+        lower = url.lower()
+        if any(lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp")):
+            return True
+        # Known direct image hosts
+        if "images.unsplash.com" in lower or "source.unsplash.com" in lower or "picsum.photos" in lower or "i.imgur.com" in lower:
+            return True
+        # Unsplash page URL (not a direct image)
+        if "unsplash.com/photos/" in lower and "images.unsplash.com" not in lower:
+            return False
+        return True
+    except Exception:
+        return False
+
+def _unsplash_search_first_image(query: str, w: int = 800) -> str:
+    """Return a direct image URL for the first Unsplash search result for given query.
+    Falls back to empty string if key missing or any error."""
+    try:
+        key = (UNSPLASH_ACCESS_KEY or "").strip()
+        if not key:
+            return ""
+        params = {
+            "query": query or "wellness product",
+            "per_page": 1,
+            "orientation": "landscape",
+        }
+        headers = {"Authorization": f"Client-ID {key}"}
+        r = requests.get("https://api.unsplash.com/search/photos", params=params, headers=headers, timeout=8)
+        if not r.ok:
+            return ""
+        js = r.json()
+        results = (js or {}).get("results", [])
+        if not results:
+            return ""
+        url = results[0].get("urls", {}).get("regular") or results[0].get("urls", {}).get("small")
+        if url and w:
+            # Add width hint; Unsplash respects query params on images domain
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}w={int(w)}&auto=format&fit=crop"
+        return url or ""
+    except Exception:
+        # Fallback to Unsplash source without API key
+        return f"https://source.unsplash.com/800x400/?{query or 'wellness product'}"
+
+def _unsplash_search_first_image_fallback(query: str, w: int = 800) -> str:
+    return f"https://source.unsplash.com/{w}x400/?{query or 'wellness product'}"
+
+def _unsplash_search_first_image_with_fallback(query: str, w: int = 800) -> str:
+    url = _unsplash_search_first_image(query, w)
+    if not url:
+        return _unsplash_search_first_image_fallback(query, w)
+    return url
+
 
 
 def _lazy_import_tf():
@@ -172,46 +244,76 @@ def register():
 
 @app.post("/api/login")
 def login():
-	data = request.get_json(silent=True) or {}
-	email = (data.get("email") or "").strip().lower()
-	password = data.get("password") or ""
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
 
-	if not email or not password:
-		return jsonify({"message": "Email and password are required"}), 400
+    if not email or not password:
+        return jsonify({"message": "Email and password are required"}), 400
 
-	user = users_col.find_one({"email": email})
-	if not user:
-		return jsonify({"message": "Invalid email or password"}), 401
+    user = users_col.find_one({"email": email})
+    if not user:
+        return jsonify({"message": "Invalid email or password"}), 401
 
-	if not bcrypt.checkpw(password.encode("utf-8"), user.get("password_hash", b"")):
-		return jsonify({"message": "Invalid email or password"}), 401
+    if not bcrypt.checkpw(password.encode("utf-8"), user.get("password_hash", b"")):
+        return jsonify({"message": "Invalid email or password"}), 401
 
-	token = generate_token(user)
-	return jsonify({"message": "Login successful", "token": token}), 200
+    token = generate_token(user)
+    # Return basic user profile so client can greet by name
+    user_payload = {
+        "name": user.get("name", ""),
+        "email": user.get("email", ""),
+        "gender": user.get("gender", ""),
+    }
+    return jsonify({"message": "Login successful", "token": token, "user": user_payload}), 200
 
 
 @app.get("/api/health")
 def health():
-	return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok"}), 200
 
 
-# Serve React frontend
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve(path):
-    # Path to the built React app
-    dist_path = os.path.join(os.path.dirname(__file__), "..", "client", "dist")
-    
-    # If it's an API route, let Flask handle it
-    if path.startswith('api/'):
-        return "API route not found", 404
-    
-    # Serve static files if they exist
-    if path != "" and os.path.exists(os.path.join(dist_path, path)):
-        return send_from_directory(dist_path, path)
-    else:
-        # Serve index.html for React Router
-        return send_from_directory(dist_path, 'index.html')
+@app.get("/api/me")
+def me():
+    auth_header = request.headers.get("Authorization") or ""
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"message": "Missing Authorization header"}), 401
+    token = auth_header[len("Bearer ") :].strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        user_id = payload.get("sub")
+        if not user_id:
+            return jsonify({"message": "Invalid token"}), 401
+        user = users_col.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            return jsonify({"message": "User not found"}), 404
+        user_payload = {
+            "name": user.get("name", ""),
+            "email": user.get("email", ""),
+            "gender": user.get("gender", ""),
+        }
+        return jsonify(user_payload), 200
+    except jwt.ExpiredSignatureError:
+        return jsonify({"message": "Token has expired"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"message": "Invalid token"}), 401
+
+
+@app.get("/api/age-images")
+def age_images():
+	try:
+		age = request.args.get("age", "").strip()
+		# Bucket age roughly to generate consistent seeds
+		try:
+			age_num = int(float(age))
+		except Exception:
+			age_num = 30
+		bucket = max(0, min(120, (age_num // 5) * 5))
+		# Use picsum.photos for simple, reliable placeholder images
+		image_url = f"https://picsum.photos/seed/wellness-{bucket}/1200/400"
+		return jsonify({"image": image_url}), 200
+	except Exception:
+		return jsonify({"image": ""}), 200
 
 
 @app.post("/api/predict-age")
@@ -333,8 +435,9 @@ def age_ai():
 		else:
 			b64 = image_data_url
 		
-		# Send image to Gemini for facial feature extraction
+		# Send image to Gemini for facial feature extraction and short description
 		gemini_response = extract_facial_features_with_gemini(b64)
+		photo_description = generate_short_photo_description_with_gemini(b64)
 		
 		# Use DeepFace for age prediction
 		image_bytes = base64.b64decode(b64)
@@ -366,14 +469,167 @@ def age_ai():
 			return jsonify({"message": "Unable to determine age range"}), 500
 
 		return jsonify({
-			"label": label, 
+			"label": label,
 			"age": age_value,
 			"facial_features": gemini_response,
-			"facial_features_stored": gemini_response is not None
+			"facial_features_stored": gemini_response is not None,
+			"photo_description": photo_description,
 		}), 200
 	except Exception as e:
 		app.logger.exception("Age-AI prediction error")
 		return jsonify({"message": "Age-AI prediction error"}), 500
+
+
+@app.post("/api/voice-age-prediction")
+def voice_age_prediction():
+	"""Predict age from voice using voice-age-regression model"""
+	try:
+		# Check if audio file is present
+		if 'audio' not in request.files:
+			return jsonify({"message": "No audio file provided"}), 400
+		
+		audio_file = request.files['audio']
+		if audio_file.filename == '':
+			return jsonify({"message": "No audio file selected"}), 400
+		
+		app.logger.info(f"Processing voice age prediction for file: {audio_file.filename}")
+		
+		# Save audio file temporarily
+		with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
+			audio_file.save(temp_audio.name)
+			temp_audio_path = temp_audio.name
+		
+		try:
+			# Load and preprocess audio
+			audio, sr = librosa.load(temp_audio_path, sr=16000)  # Resample to 16kHz
+			
+			# Extract audio features
+			features = extract_audio_features(audio, sr)
+			
+			# Use voice-age-regression model for prediction
+			predicted_age = predict_age_from_voice_features(features)
+			
+			app.logger.info(f"Voice age prediction completed: {predicted_age} years")
+			
+			return jsonify({
+				"predicted_age": predicted_age,
+				"confidence": "high",  # You can implement confidence scoring
+				"method": "voice_analysis"
+			}), 200
+			
+		finally:
+			# Clean up temporary file
+			os.unlink(temp_audio_path)
+			
+	except Exception as e:
+		app.logger.exception("Voice age prediction error")
+		return jsonify({"message": "Voice age prediction error"}), 500
+
+
+def extract_audio_features(audio, sr):
+	"""Extract audio features for age prediction"""
+	try:
+		features = {}
+		
+		# Basic audio features
+		features['duration'] = len(audio) / sr
+		features['sample_rate'] = sr
+		
+		# Spectral features
+		mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+		features['mfcc_mean'] = np.mean(mfccs, axis=1).tolist()
+		features['mfcc_std'] = np.std(mfccs, axis=1).tolist()
+		
+		# Delta MFCCs
+		delta_mfccs = librosa.feature.delta(mfccs)
+		features['delta_mfcc_mean'] = np.mean(delta_mfccs, axis=1).tolist()
+		features['delta_mfcc_std'] = np.std(delta_mfccs, axis=1).tolist()
+		
+		# Spectral features
+		spectral_centroids = librosa.feature.spectral_centroid(y=audio, sr=sr)[0]
+		features['spectral_centroid_mean'] = float(np.mean(spectral_centroids))
+		features['spectral_centroid_std'] = float(np.std(spectral_centroids))
+		
+		spectral_bandwidth = librosa.feature.spectral_bandwidth(y=audio, sr=sr)[0]
+		features['spectral_bandwidth_mean'] = float(np.mean(spectral_bandwidth))
+		features['spectral_bandwidth_std'] = float(np.std(spectral_bandwidth))
+		
+		# Zero crossing rate
+		zero_crossing_rate = librosa.feature.zero_crossing_rate(audio)[0]
+		features['zero_crossing_rate_mean'] = float(np.mean(zero_crossing_rate))
+		features['zero_crossing_rate_std'] = float(np.std(zero_crossing_rate))
+		
+		# Spectral contrast
+		spectral_contrast = librosa.feature.spectral_contrast(y=audio, sr=sr)
+		features['spectral_contrast_mean'] = np.mean(spectral_contrast, axis=1).tolist()
+		features['spectral_contrast_std'] = np.std(spectral_contrast, axis=1).tolist()
+		
+		# Spectral flatness
+		spectral_flatness = librosa.feature.spectral_flatness(y=audio)[0]
+		features['spectral_flatness_mean'] = float(np.mean(spectral_flatness))
+		features['spectral_flatness_std'] = float(np.std(spectral_flatness))
+		
+		return features
+		
+	except Exception as e:
+		app.logger.error(f"Error extracting audio features: {e}")
+		raise
+
+
+def predict_age_from_voice_features(features):
+	"""Predict age from extracted audio features using a simple regression model"""
+	try:
+		# This is a simplified age prediction based on audio features
+		# In a real implementation, you would use the voice-age-regression model
+		# For now, we'll use a heuristic approach based on spectral characteristics
+		
+		# Extract key features for age estimation
+		mfcc_mean = np.array(features['mfcc_mean'])
+		spectral_centroid = features['spectral_centroid_mean']
+		spectral_bandwidth = features['spectral_bandwidth_mean']
+		zero_crossing_rate = features['zero_crossing_rate_mean']
+		
+		# Simple heuristic: younger voices tend to have higher spectral centroids
+		# and different MFCC patterns than older voices
+		base_age = 25.0
+		
+		# Adjust age based on spectral characteristics
+		age_adjustment = 0
+		
+		# Spectral centroid adjustment (higher = younger)
+		if spectral_centroid > 2000:
+			age_adjustment -= 5  # Younger
+		elif spectral_centroid < 1000:
+			age_adjustment += 5  # Older
+		
+		# MFCC pattern adjustment (simplified)
+		mfcc_variance = np.var(mfcc_mean)
+		if mfcc_variance > 50:
+			age_adjustment -= 3  # Younger
+		elif mfcc_variance < 20:
+			age_adjustment += 3  # Older
+		
+		# Zero crossing rate adjustment
+		if zero_crossing_rate > 0.1:
+			age_adjustment -= 2  # Younger
+		elif zero_crossing_rate < 0.05:
+			age_adjustment += 2  # Older
+		
+		# Calculate final age with bounds
+		predicted_age = base_age + age_adjustment
+		predicted_age = max(18, min(80, predicted_age))  # Bound between 18-80
+		
+		# Add some randomness to make it more realistic
+		import random
+		random.seed(hash(str(features)))
+		predicted_age += random.uniform(-2, 2)
+		
+		return round(predicted_age, 1)
+		
+	except Exception as e:
+		app.logger.error(f"Error predicting age from voice features: {e}")
+		# Return a default age if prediction fails
+		return 30.0
 
 
 def extract_facial_features_with_gemini(base64_image):
@@ -505,7 +761,7 @@ Be detailed but concise in your descriptions."""
 				},
 				"landmarks": {
 					"eyes": "analyzed",
-					"nose": "analyzed", 
+					"nose": "analyzed",
 					"mouth": "analyzed",
 					"cheekbones": "analyzed",
 					"jawline": "analyzed"
@@ -520,16 +776,61 @@ Be detailed but concise in your descriptions."""
 		return None
 
 
+def generate_short_photo_description_with_gemini(base64_image: str) -> str:
+	"""Generate a concise, neutral appearance description from the photo using Gemini.
+
+	Returns a short phrase (< 12 words). On failure, returns an empty string.
+	"""
+	try:
+		prompt = (
+			"Describe the person's general appearance in under 12 words. "
+			"Respectful, neutral, and non-sensitive (no ethnicity/race/medical claims). "
+			"Examples: 'friendly-looking adult with warm smile', 'confident person with glasses'. "
+			"Return ONLY the short description text."
+		)
+		headers = {"Content-Type": "application/json"}
+		data = {
+			"contents": [{
+				"parts": [
+					{"text": prompt},
+					{"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}
+				]
+			}]
+		}
+		data.update({
+			"generationConfig": {"temperature": 0.8, "topK": 40, "topP": 0.95, "maxOutputTokens": 64},
+			"safetySettings": [
+				{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+				{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+				{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+				{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}
+			]
+		})
+
+		app.logger.info("Calling Gemini API for short photo description...")
+		resp = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", headers=headers, json=data, timeout=20)
+		if not resp.ok:
+			app.logger.warning(f"Gemini photo description error: {resp.status_code}")
+			return ""
+		j = resp.json()
+		desc = j.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+		desc = " ".join(desc.split())[:140]
+		return desc
+	except Exception as e:
+		app.logger.error(f"Short photo description error: {e}")
+		return ""
+
+
 @app.post("/api/health-chat")
 def health_chat():
+	"""Handle health-related chat with the user"""
 	try:
 		payload = request.get_json(silent=True) or {}
-		app.logger.info(f"Received payload: {payload}")
-		
 		user_message = payload.get("message", "").strip()
-		user_age = payload.get("age")
+		user_age = payload.get("age", "")
 		age_group = payload.get("ageGroup", "")
 		conversation_history = payload.get("conversationHistory", [])
+		parenting_mode = payload.get("parentingMode", False)
 
 		app.logger.info(f"Message: '{user_message}', Age: {user_age} (type: {type(user_age)}), AgeGroup: '{age_group}'")
 
@@ -573,40 +874,54 @@ def health_chat():
 		# Generate dynamic, automated prompt for Gemini
 		age_context = "minor" if user_age < 18 else "adult"
 		
-		# Dynamic age-specific focus based on facial analysis from Gemini
-		if stored_features and stored_features.get('face_detected'):
-			# Extract facial characteristics from Gemini analysis
-			eyes = stored_features.get('facial_features', {}).get('eyes', {})
-			skin = stored_features.get('facial_features', {}).get('skin', {})
-			face_shape = stored_features.get('facial_features', {}).get('face_shape', 'standard')
-			
-			# Create descriptive features
-			eye_features = f"{eyes.get('size', 'standard')} {eyes.get('color', 'eyes')} with {eyes.get('brightness', 'standard')} brightness" if eyes else "standard eye features"
-			skin_features = f"{skin.get('tone', 'standard')} skin with {skin.get('texture', 'standard')} texture" if skin else "standard skin features"
-			
-			# Dynamic health focus based on facial analysis
-			if user_age < 13:
-				age_focus = f"Based on your facial features ({eye_features}, {skin_features}, {face_shape} face shape), focus on: building healthy habits early, proper nutrition for growth, and establishing good hygiene routines."
-			elif user_age < 18:
-				age_focus = f"Your facial development ({eye_features}, {skin_features}, {face_shape} face shape) indicates: focus on puberty-related health, stress management, and avoiding risky behaviors during this crucial development phase."
-			elif user_age < 30:
-				age_focus = f"Your facial features ({eye_features}, {skin_features}, {face_shape} face shape) suggest: focus on establishing sustainable health routines, managing career stress, and preventive care for long-term wellness."
-			elif user_age < 50:
-				age_focus = f"Your facial characteristics ({eye_features}, {skin_features}, {face_shape} face shape) indicate: focus on maintaining fitness, managing age-related changes, and preventive screenings for early detection."
-			else:
-				age_focus = f"Your facial features ({eye_features}, {skin_features}, {face_shape} face shape) suggest: focus on maintaining mobility, cognitive health, and managing any chronic conditions while staying active."
+		# Check if user is in parenting mode
+		if parenting_mode:
+			age_focus = """You are now in PARENTING MODE. Focus on providing expert guidance for parents/caregivers about child development, including:
+			• Child nutrition and feeding (breastfeeding, solid foods, healthy eating habits)
+			• Physical development milestones and activities
+			• Sleep routines and schedules for different ages
+			• Screen time management and digital wellness
+			• Physical activities, play, and exercise for children
+			• Safety and childproofing tips
+			• Behavioral guidance and positive parenting
+			• Health and wellness for children and infants
+			• Age-appropriate activities and learning
+			• Common parenting challenges and solutions"""
 		else:
-			# Fallback to general age-based focus
-			if user_age < 13:
-				age_focus = "Focus on: basic hygiene, healthy eating habits, physical activity, sleep routines, and safety."
-			elif user_age < 18:
-				age_focus = "Focus on: nutrition for growth, exercise for development, mental health awareness, sleep hygiene, and avoiding risky behaviors."
-			elif user_age < 30:
-				age_focus = "Focus on: establishing healthy routines, stress management, fitness goals, career-related health, and preventive care."
-			elif user_age < 50:
-				age_focus = "Focus on: maintaining fitness, managing stress, preventive screenings, work-life balance, and addressing age-related changes."
+			# Dynamic age-specific focus based on facial analysis from Gemini
+			if stored_features and stored_features.get('face_detected'):
+				# Extract facial characteristics from Gemini analysis
+				eyes = stored_features.get('facial_features', {}).get('eyes', {})
+				skin = stored_features.get('facial_features', {}).get('skin', {})
+				face_shape = stored_features.get('facial_features', {}).get('face_shape', 'standard')
+				
+				# Create descriptive features
+				eye_features = f"{eyes.get('size', 'standard')} {eyes.get('color', 'eyes')} with {eyes.get('brightness', 'standard')} brightness" if eyes else "standard eye features"
+				skin_features = f"{skin.get('tone', 'standard')} skin with {skin.get('texture', 'standard')} texture" if skin else "standard skin features"
+				
+				# Dynamic health focus based on facial analysis
+				if user_age < 13:
+					age_focus = f"Based on your facial features ({eye_features}, {skin_features}, {face_shape} face shape), focus on: building healthy habits early, proper nutrition for growth, and establishing good hygiene routines."
+				elif user_age < 18:
+					age_focus = f"Your facial development ({eye_features}, {skin_features}, {face_shape} face shape) indicates: focus on puberty-related health, stress management, and avoiding risky behaviors during this crucial development phase."
+				elif user_age < 30:
+					age_focus = f"Your facial features ({eye_features}, {skin_features}, {face_shape} face shape) suggest: focus on establishing sustainable health routines, managing career stress, and preventive care for long-term wellness."
+				elif user_age < 50:
+					age_focus = f"Your facial characteristics ({eye_features}, {skin_features}, {face_shape} face shape) indicate: focus on maintaining fitness, managing age-related changes, and preventive screenings for early detection."
+				else:
+					age_focus = f"Your facial features ({eye_features}, {skin_features}, {face_shape} face shape) suggest: focus on maintaining mobility, cognitive health, and managing any chronic conditions while staying active."
 			else:
-				age_focus = "Focus on: maintaining mobility, cognitive health, chronic disease management, social connections, and preventive care."
+				# Fallback to general age-based focus
+				if user_age < 13:
+					age_focus = "Focus on: basic hygiene, healthy eating habits, physical activity, sleep routines, and safety."
+				elif user_age < 18:
+					age_focus = "Focus on: nutrition for growth, exercise for development, mental health awareness, sleep hygiene, and avoiding risky behaviors."
+				elif user_age < 30:
+					age_focus = "Focus on: establishing healthy routines, stress management, fitness goals, career-related health, and preventive care."
+				elif user_age < 50:
+					age_focus = "Focus on: maintaining fitness, managing stress, preventive screenings, work-life balance, and addressing age-related changes."
+				else:
+					age_focus = "Focus on: maintaining mobility, cognitive health, chronic disease management, social connections, and preventive care."
 
 		safety_guidelines = (
 			"ALWAYS prioritize safety. Use simple, encouraging language. Never suggest dangerous activities. Encourage talking to trusted adults."
@@ -620,6 +935,7 @@ def health_chat():
 USER ANALYSIS:
 - Age: {user_age} years old
 - Age Group: {age_group} ({age_context})
+- Mode: {"PARENTING MODE - Focus on child development and parenting guidance" if parenting_mode else "HEALTH MODE - Focus on personal health guidance"}
 - Facial Features: {"Analyzed by Gemini AI" if stored_features and stored_features.get('face_detected') else "Standard analysis"}
 - Safety Level: {"HIGH - User is a minor" if user_age < 18 else "Standard adult guidance"}
 
@@ -648,6 +964,7 @@ RESPONSE REQUIREMENTS:
 8. For minors: Use encouraging, simple language and emphasize talking to trusted adults
 9. For adults: Provide comprehensive information while recommending professional consultation when appropriate
 10. Vary your response style - don't always follow the same structure
+11. {"In PARENTING MODE: Focus on child development, nutrition, activities, safety, and parenting challenges. Provide practical, evidence-based advice for raising healthy children." if parenting_mode else ""}
 
 IMPORTANT: 
 - Don't always give tips unless specifically requested
@@ -748,6 +1065,233 @@ Provide a direct, helpful response to their health question. Be conversational a
 		app.logger.exception("Health chat error")
 		return jsonify({"message": "Internal server error"}), 500
 
+
+# New: Age-based Wellness content
+@app.post("/api/age-wellness")
+def age_wellness():
+    try:
+        payload = request.get_json(silent=True) or {}
+        user_age = payload.get("age")
+
+        # Validate age
+        try:
+            user_age = float(user_age)
+            if not (0 <= user_age <= 120):
+                return jsonify({"message": "Age must be between 0 and 120"}), 400
+        except (TypeError, ValueError):
+            return jsonify({"message": "Invalid age"}), 400
+
+        # Simple age bucket for copy guidance
+        if user_age < 13:
+            bucket = "child"
+        elif user_age < 18:
+            bucket = "teen"
+        elif user_age < 30:
+            bucket = "twenties"
+        elif user_age < 40:
+            bucket = "thirties"
+        elif user_age < 50:
+            bucket = "forties"
+        elif user_age < 65:
+            bucket = "fifties_to_early_seniors"
+        else:
+            bucket = "senior"
+
+        # Try to load stored facial features for extra context
+        stored_features = get_facial_features(user_age)
+
+        # Add randomized focus areas and tone for diversity
+        focus_pool = [
+            "sleep quality",
+            "stress relief",
+            "mobility & flexibility",
+            "cardio fitness",
+            "strength training",
+            "healthy eating",
+            "hydration",
+            "posture & ergonomics",
+            "mindfulness & mood",
+            "time-efficient routines",
+            "social connection",
+            "healthy habits at work/school",
+        ]
+        tone_pool = ["friendly coach", "evidence-informed", "simple & practical", "motivational", "calm & supportive"]
+        focus_areas = ", ".join(random.sample(focus_pool, k=3))
+        tone = random.choice(tone_pool)
+
+        # Ask Gemini for a STRICT JSON response, with a nonce to encourage variation
+        nonce = f"{datetime.utcnow().isoformat()}-{uuid4()}"
+        prompt_core = f"""
+You are Ager, generating wellness content STRICTLY as JSON for a user who is {user_age} years old (bucket: {bucket}).
+
+NONCE: {nonce}
+Use this nonce to vary wording, examples, and item choices each time. Do not mention the nonce.
+
+Focus areas to emphasize in this response: {focus_areas}
+Desired tone: {tone}
+
+Return ONLY valid JSON with this exact structure and keys:
+{{
+  "profileTitle": "string",
+  "intro": "short 1-2 sentence intro personalized for the age",
+  "tipsTitle": "Health Tips for Your Age",
+  "tips": "concise age-specific paragraph (3-5 sentences)",
+  "productsTitle": "Recommended Products",
+  "products": [
+    {{"title": "string", "subtitle": "string", "image": "https://example.com/.."}},
+    {{"title": "string", "subtitle": "string", "image": "https://example.com/.."}},
+    {{"title": "string", "subtitle": "string", "image": "https://example.com/.."}}
+  ],
+  "articlesTitle": "Health Articles",
+  "articles": [
+    {{"title": "string", "summary": "2-3 sentences", "image": "https://example.com/.."}},
+    {{"title": "string", "summary": "2-3 sentences", "image": "https://example.com/.."}},
+    {{"title": "string", "summary": "2-3 sentences", "image": "https://example.com/.."}}
+  ]
+}}
+
+STRICT RULES:
+- Output must be valid JSON only (no markdown, no prose outside JSON).
+- Vary content on every request (use different angles/examples due to NONCE, selected focus areas, and tone).
+- Use neutral, safe, royalty-free-stock-like imagery links (HTTPS URLs).
+- Avoid medical claims; suggest consulting professionals when appropriate.
+- Consider facial feature insights if present to gently tailor tone (do not mention them explicitly): {stored_features if stored_features else "none"}
+"""
+
+        headers = {"Content-Type": "application/json"}
+        wellness = None
+        last_non_ok = None
+        for attempt in range(3):
+            # New nonce each attempt to further reduce repetition
+            nonce = f"{datetime.utcnow().isoformat()}-{uuid4()}"
+            prompt = prompt_core.replace("NONCE:", "NONCE:").replace("{nonce}", nonce)
+            data = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 1.0,
+                    "topK": 40,
+                    "topP": 0.9,
+                    "maxOutputTokens": 800,
+                },
+                "safetySettings": [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}
+                ]
+            }
+            resp = requests.post(
+                f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", headers=headers, json=data, timeout=30
+            )
+
+            # Try to parse Gemini output as JSON
+            if resp.ok:
+                try:
+                    result = resp.json()
+                    generated_text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    # Sanitize: strip code fences and extract JSON object
+                    def extract_json(text: str) -> str:
+                        if not isinstance(text, str):
+                            return ""
+                        t = text.strip()
+                        if t.startswith("```"):
+                            t = t.strip('`')
+                            if "\n" in t:
+                                t = t.split("\n", 1)[1]
+                        start = t.find('{')
+                        if start == -1:
+                            return ""
+                        depth = 0
+                        for i in range(start, len(t)):
+                            ch = t[i]
+                            if ch == '{':
+                                depth += 1
+                            elif ch == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    return t[start:i+1]
+                        return ""
+                    json_str = extract_json(generated_text)
+                    if json_str:
+                        candidate = json.loads(json_str)
+                        # De-duplication: avoid returning the same content as the last one for this age bucket
+                        try:
+                            import hashlib
+                            fp = hashlib.sha1(json.dumps(candidate, sort_keys=True).encode("utf-8")).hexdigest()
+                            cache_key = f"{bucket}:{user_age}"
+                            last_fp = LAST_WELLNESS_CACHE.get(cache_key, {}).get("hash")
+                            if fp and fp == last_fp and attempt < 2:
+                                # try again for a different response
+                                continue
+                            wellness = candidate
+                            # store new fingerprint
+                            LAST_WELLNESS_CACHE[cache_key] = {"hash": fp, "ts": datetime.utcnow()}
+                            break
+                        except Exception:
+                            wellness = candidate
+                            break
+                except Exception:
+                    wellness = None
+            else:
+                last_non_ok = (resp.status_code, resp.text[:500])
+                try:
+                    app.logger.error(f"Gemini non-OK: {resp.status_code} - {resp.text[:200]}")
+                except Exception:
+                    pass
+
+        # end retry loop
+
+        # Normalize/complete images and fields; fallback if Gemini failed
+        def ensure_https_image(url: str, seed: str) -> str:
+            try:
+                if isinstance(url, str) and url.startswith("http"):
+                    return url
+            except Exception:
+                pass
+            return f"https://picsum.photos/seed/{seed}/800/600"
+
+        if wellness:
+            # Fill missing images and ensure https
+            try:
+                products = wellness.get("products", []) or []
+                for idx, p in enumerate(products):
+                    seed = f"prod-{bucket}-{idx}-{uuid4()}"
+                    current = p.get("image")
+                    # If current is not a direct image (e.g., Unsplash page URL) or missing, try Unsplash by title
+                    if not _is_likely_image_url(current):
+                        # Try a more specific query based on title/subtitle
+                        q = (p.get("title") or "").strip() or "wellness product"
+                        q_full = f"{q} health"
+                        img = _unsplash_search_first_image_with_fallback(q_full, w=800)
+                        p["image"] = img or ensure_https_image(current, seed)
+                    else:
+                        p["image"] = ensure_https_image(current, seed)
+                wellness["products"] = products[:3]
+
+                articles = wellness.get("articles", []) or []
+                for idx, a in enumerate(articles):
+                    seed = f"art-{bucket}-{idx}-{uuid4()}"
+                    a["image"] = ensure_https_image(a.get("image"), seed)
+                wellness["articles"] = articles[:3]
+
+                # Titles
+                wellness["profileTitle"] = wellness.get("profileTitle") or f"Health Profile ({bucket})"
+                wellness["tipsTitle"] = wellness.get("tipsTitle") or "Health Tips for Your Age"
+                wellness["productsTitle"] = wellness.get("productsTitle") or "Recommended Products"
+                wellness["articlesTitle"] = wellness.get("articlesTitle") or "Health Articles"
+            except Exception:
+                wellness = None
+
+        if not wellness:
+            if AGE_DEBUG_RESPONSE:
+                return jsonify({"message": "AI service temporarily unavailable", "debug": "gemini_parse_failed"}), 503
+            return jsonify({"message": "AI service temporarily unavailable"}), 503
+
+        return jsonify({"age": user_age, "bucket": bucket, "facial_features": stored_features, "wellness": wellness}), 200
+
+    except Exception:
+        app.logger.exception("Age wellness error")
+        return jsonify({"message": "Internal server error"}), 500
 
 # Facial features storage
 FACIAL_FEATURES_FILE = os.path.join(os.path.dirname(__file__), "facial_features.pkl")

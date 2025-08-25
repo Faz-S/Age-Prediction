@@ -21,6 +21,20 @@ export default function Login() {
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.message || 'Login failed')
       if (data.token) localStorage.setItem('token', data.token)
+      // Persist user basic info if provided by API
+      try {
+        if (data.user && typeof data.user.name === 'string') {
+          localStorage.setItem('userName', data.user.name)
+        }
+        if (data.user && typeof data.user.email === 'string') {
+          localStorage.setItem('userEmail', data.user.email)
+        }
+        if (data.user && typeof data.user.gender === 'string') {
+          const g = String(data.user.gender || '').toLowerCase()
+          localStorage.setItem('userGender', g)
+          localStorage.setItem('gender', g)
+        }
+      } catch {}
       navigate('/home')
     } catch (err) {
       setError(err.message)

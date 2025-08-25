@@ -1,0 +1,276 @@
+import { useEffect, useRef, useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { useNavigate } from 'react-router-dom'
+
+export default function Home() {
+	const videoElementRef = useRef(null)
+	const mediaStreamRef = useRef(null)
+	const navigate = useNavigate()
+	const [hasCaptured, setHasCaptured] = useState(false)
+	const [capturedDataUrl, setCapturedDataUrl] = useState('')
+	const [errorTitle, setErrorTitle] = useState('')
+	const [errorHint, setErrorHint] = useState('')
+	const [isStarting, setIsStarting] = useState(true)
+	const [isPredicting, setIsPredicting] = useState(false)
+	const [predictedLabel, setPredictedLabel] = useState('')
+	const [predictedConfidence, setPredictedConfidence] = useState(null)
+	const [predictedAge, setPredictedAge] = useState(null)
+	
+	// Voice recording states
+	const [isRecordingVoice, setIsRecordingVoice] = useState(false)
+	const [voiceActivityLevel, setVoiceActivityLevel] = useState(0)
+	const [voiceError, setVoiceError] = useState(null)
+	const [audioBlob, setAudioBlob] = useState(null)
+	const [audioUrl, setAudioUrl] = useState(null)
+	const [isProcessingVoice, setIsProcessingVoice] = useState(false)
+	const [voicePredictedAge, setVoicePredictedAge] = useState(null)
+	const [currentSentence, setCurrentSentence] = useState("The quick brown fox jumps over the lazy dog. This sentence contains all the letters of the alphabet.")
+	const mediaRecorderRef = useRef(null)
+	const audioChunksRef = useRef([])
+	
+	const sampleSentences = [
+		"The quick brown fox jumps over the lazy dog. This sentence contains all the letters of the alphabet.",
+		"Pack my box with five dozen liquor jugs. A pangram for testing voice recognition.",
+		"How vexingly quick daft zebras jump! Another useful pangram for voice analysis.",
+		"The five boxing wizards jump quickly. Perfect for testing voice clarity and pronunciation."
+	]
+
+	// ... [Previous function definitions remain unchanged]
+
+	return (
+		<div className="min-h-screen bg-white">
+			<div className="h-full mx-auto max-w-7xl px-8 py-6 flex flex-col">
+				<div className="text-left mb-6">
+					<h1 className="text-3xl font-semibold text-gray-900 mb-1">Age Prediction</h1>
+					<p className="text-base text-gray-600">Our system uses your webcam and microphone to provide a personalized experience. Please enable access when prompted.</p>
+				</div>
+
+				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1">
+					{/* Left Panel - Real-time Analysis */}
+					<div className="bg-white rounded border border-gray-200 p-6 flex flex-col">
+						<div className="mb-4">
+							<h2 className="text-xl font-semibold text-gray-900 mb-2">Real-time Analysis</h2>
+						</div>
+
+						{/* Webcam Feed Area */}
+						<div className="relative w-full h-80 rounded border border-gray-200 bg-gray-50 overflow-hidden grid place-items-center mb-4">
+							{errorTitle ? (
+								<div className="px-6 text-center">
+									<p className="font-medium text-red-600">{errorTitle}</p>
+									<p className="mt-1 text-sm text-gray-600">{errorHint}</p>
+								</div>
+							) : capturedDataUrl ? (
+								<img src={capturedDataUrl} alt="Captured" className="h-full w-full object-contain" />
+							) : (
+								<div className="text-center">
+									<div className="flex flex-col items-center gap-2">
+										<span className="text-2xl">📸</span>
+										<p className="text-gray-500 text-sm">Webcam feed will appear here</p>
+									</div>
+								</div>
+							)}
+							{!errorTitle && !capturedDataUrl && (
+								<video ref={videoElementRef} className="absolute inset-0 h-full w-full object-cover" autoPlay playsInline muted />
+							)}
+							{(isStarting || isPredicting) && !errorTitle && (
+								<div className="absolute inset-0 grid place-items-center bg-white/30 backdrop-blur-sm">
+									<div className="h-5 w-5 animate-spin rounded-full border-2 border-black border-t-transparent" />
+								</div>
+							)}
+						</div>
+
+						{/* Control Buttons */}
+						<div className="flex items-center gap-3 justify-start">
+							{!capturedDataUrl ? (
+								<button onClick={handleCapture} className="bg-black hover:bg-gray-900 text-white px-4 py-2 rounded text-sm font-medium transition-colors" disabled={!!errorTitle || isStarting || isPredicting}>
+									Start Camera
+								</button>
+							) : (
+								<button onClick={handleRetake} className="bg-gray-200 hover:bg-gray-300 text-gray-900 px-4 py-2 rounded text-sm font-medium transition-colors" disabled={isStarting || isPredicting}>
+									Stop Camera
+								</button>
+							)}
+							{!capturedDataUrl ? (
+								<button onClick={handlePredict} className="bg-gray-100 text-gray-400 px-4 py-2 rounded text-sm font-medium transition-colors" disabled={true}>
+									Predict Age
+								</button>
+							) : (
+								<button onClick={handlePredict} className="bg-black hover:bg-gray-900 text-white px-4 py-2 rounded text-sm font-medium transition-colors" disabled={isPredicting}>
+									Predict Age
+								</button>
+							)}
+							<button onClick={startCamera} className="text-sm px-3 py-2 rounded bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors">
+								Retry
+							</button>
+						</div>
+					</div>
+
+					{/* Right Panel - Audio Input */}
+					<div className="bg-white rounded border border-gray-200 p-6 flex flex-col">
+						<div className="mb-4">
+							<h2 className="text-xl font-semibold text-gray-900 mb-2">Audio Input</h2>
+						</div>
+
+						{/* Text to Read */}
+						<div className="bg-gray-50 p-4 rounded border border-gray-200 mb-4">
+							<div className="flex items-center justify-between mb-2">
+								<span className="text-sm text-gray-600">Please read the following:</span>
+								<button onClick={refreshSentence} className="text-gray-400 hover:text-gray-600 transition-colors">
+									<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
+								</button>
+							</div>
+							<p className="text-gray-700 text-sm">
+								{currentSentence}
+							</p>
+						</div>
+
+						{/* Voice Activity Indicator */}
+						<div className="mb-4">
+							<div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+								<div 
+									className={`h-full rounded-full transition-all duration-200 ${
+										isRecordingVoice ? 'bg-black' : 'bg-gray-300'
+									}`} 
+									style={{ width: `${voiceActivityLevel}%` }}
+								></div>
+							</div>
+							<p className="text-xs text-gray-500 mt-2">
+								{isRecordingVoice ? 'Recording in progress...' : 'Voice activity detected'}
+							</p>
+						</div>
+
+						{/* Audio Playback */}
+						{audioUrl && (
+							<div className="mb-4">
+								<audio controls className="w-full h-8">
+									<source src={audioUrl} type="audio/wav" />
+									Your browser does not support audio playback.
+								</audio>
+							</div>
+						)}
+
+						{/* Control Buttons */}
+						<div className="flex items-center gap-3 justify-start">
+							{!isRecordingVoice && !audioBlob ? (
+								<button 
+									onClick={startVoiceRecording}
+									className="bg-black hover:bg-gray-900 text-white px-4 py-2 rounded text-sm font-medium transition-colors"
+								>
+									Start Recording
+								</button>
+							) : isRecordingVoice ? (
+								<button 
+									onClick={stopVoiceRecording}
+									className="bg-gray-200 hover:bg-gray-300 text-gray-900 px-4 py-2 rounded text-sm font-medium transition-colors"
+								>
+									Stop Recording
+								</button>
+							) : (
+								<>
+									<button 
+										onClick={predictAgeFromVoice}
+										className="bg-black hover:bg-gray-900 text-white px-4 py-2 rounded text-sm font-medium transition-colors"
+										disabled={isProcessingVoice}
+									>
+										{isProcessingVoice ? 'Processing...' : 'Predict Age'}
+									</button>
+									<button 
+										onClick={retryVoiceRecording}
+										className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded text-sm font-medium transition-colors"
+									>
+										Retry
+									</button>
+								</>
+							)}
+						</div>
+						
+						{/* Voice Error Display */}
+						{voiceError && (
+							<div className="mt-3 p-2 bg-red-50 border border-red-100 rounded">
+								<p className="text-red-600 text-xs text-center">{voiceError}</p>
+							</div>
+						)}
+
+						{/* Voice Prediction Results */}
+						{voicePredictedAge && (
+							<div className="mt-3 p-3 bg-green-50 border border-green-100 rounded">
+								<div className="text-center">
+									<div className="text-lg font-medium text-green-800 mb-1">
+										Voice Age Prediction: {Math.round(voicePredictedAge)} years
+									</div>
+									<div className="text-sm text-green-600">
+										Age predicted from voice analysis
+									</div>
+								</div>
+							</div>
+						)}
+					</div>
+				</div>
+
+				{/* Results Section */}
+				<div className="mt-8 max-w-3xl mx-auto">
+					{/* Status Messages */}
+					{hasCaptured && !predictedAge && (
+						<motion.div
+							initial={{ opacity: 0, y: 20 }}
+							animate={{ opacity: 1, y: 0 }}
+							className="rounded bg-blue-50 border border-blue-100 p-3 mb-3"
+						>
+							<div className="flex items-center gap-2">
+								<span className="text-xl">📸</span>
+								<div>
+									<h3 className="font-medium text-blue-800 text-sm">Image Captured</h3>
+									<p className="text-xs text-blue-600">Click "Predict Age" to analyze your photo</p>
+								</div>
+							</div>
+						</motion.div>
+					)}
+
+					{/* Age Prediction Results */}
+					{predictedAge != null && (
+						<motion.div
+							initial={{ opacity: 0, y: 20 }}
+							animate={{ opacity: 1, y: 0 }}
+							className="rounded bg-white border border-gray-200 p-6"
+						>
+							<div className="flex items-center justify-between mb-4">
+								<h2 className="text-xl font-semibold text-gray-900">Estimated Age</h2>
+								<div className="text-3xl font-semibold text-black">{Math.round(predictedAge)}</div>
+							</div>
+
+							{/* Age Range Slider */}
+							<div className="mb-4">
+								<div className="relative h-2 bg-gray-100 rounded-full overflow-hidden">
+									<div 
+										className="absolute top-0 left-0 h-full bg-black rounded-full"
+										style={{ width: `${Math.min(Math.max((predictedAge / 100) * 100, 0), 100)}%` }}
+									></div>
+								</div>
+								<div className="flex justify-between text-xs text-gray-500 mt-1">
+									<span>0</span>
+									<span>25</span>
+									<span>50</span>
+									<span>75</span>
+									<span>100</span>
+								</div>
+							</div>
+
+							{/* Continue Button */}
+							<motion.button
+								initial={{ opacity: 0, scale: 0.95 }}
+								animate={{ opacity: 1, scale: 1 }}
+								transition={{ delay: 0.2 }}
+								onClick={() => navigate('/chatbot', { state: { predictedAge: predictedAge } })}
+								className="w-full rounded bg-black px-4 py-2 font-medium text-white hover:bg-gray-900 transition-colors text-sm"
+							>
+								Continue to Health Chatbot
+							</motion.button>
+						</motion.div>
+					)}
+				</div>
+			</div>
+		</div>
+	)
+}
