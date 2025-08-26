@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLocation, useNavigate } from 'react-router-dom'
+import Navbar from '../../components/Navbar'
 import config from '../../config.js'
 import ChatBg from '../../assets/back.png'
 import BoyBg from '../../assets/boy.png'
@@ -25,6 +26,21 @@ export default function Chatbot() {
 	const [isParent, setIsParent] = useState(false)
 	const [parentingMode, setParentingMode] = useState(false)
 	const [showParentingQuestion, setShowParentingQuestion] = useState(false)
+
+	// Responsive background size for decorative image
+	const [bgSize, setBgSize] = useState('60% auto')
+	useEffect(() => {
+		const calcSize = () => {
+			const w = window.innerWidth
+			if (w < 640) return '85% auto'       // small screens
+			if (w < 1024) return '65% auto'      // tablets
+			return '50% auto'                    // desktops
+		}
+		setBgSize(calcSize())
+		const onResize = () => setBgSize(calcSize())
+		window.addEventListener('resize', onResize)
+		return () => window.removeEventListener('resize', onResize)
+	}, [])
 
 	// Get predicted age from navigation state
 	useEffect(() => {
@@ -435,90 +451,7 @@ export default function Chatbot() {
 				
 			}}
 		>
-			{/* Header */}
-			<header className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
-				<div className="flex items-center space-x-3">
-					<div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-						<div className="w-4 h-4 bg-white rounded-sm"></div>
-					</div>
-					<div>
-						<h1 className="text-xl font-semibold text-gray-900">AgeWise</h1>
-						<p className="text-xs text-gray-500">Health AI Assistant </p>
-					</div>
-				</div>
-				
-									<div className="flex items-center space-x-2">
-						{/* Mode Toggle Button */}
-						{predictedAge > 25 && (
-							<button 
-								onClick={() => {
-									if (parentingMode) {
-										setParentingMode(false);
-										setIsParent(false);
-										const modeSwitchMessage = {
-											id: Date.now(),
-											type: 'ai',
-											content: "I've switched back to health mode. I'll now provide you with personalized health guidance based on your age and facial analysis. What health topic would you like to discuss?",
-											timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-										};
-										setMessages(prev => [...prev, modeSwitchMessage]);
-									} else {
-										setParentingMode(true);
-										setIsParent(true);
-										const modeSwitchMessage = {
-											id: Date.now(),
-											type: 'ai',
-											content: "I've switched to parenting mode! I can now help you with child development, nutrition, activities, safety, and parenting challenges. What would you like to know about raising your child?",
-											timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-										};
-										setMessages(prev => [...prev, modeSwitchMessage]);
-									}
-								}}
-								className={`px-3 py-1 text-xs rounded-lg transition-colors ${
-									parentingMode 
-										? 'bg-pink-100 hover:bg-pink-200 text-pink-600 border border-pink-200' 
-										: 'bg-blue-100 hover:bg-blue-200 text-blue-600 border border-blue-200'
-								}`}
-								title={parentingMode ? "Switch to Health Mode" : "Switch to Parenting Mode"}
-							>
-								{parentingMode ? '👶 Parenting' : '🏥 Health'}
-							</button>
-						)}
-
-						{/* Wellness Navigation Button */}
-						<button 
-							onClick={() => navigate('/wellness', { state: { age: predictedAge } })}
-							disabled={!predictedAge}
-							className={`px-3 py-1 text-xs rounded-lg transition-colors border ${
-								predictedAge ? 'bg-green-100 hover:bg-green-200 text-green-600 border-green-200' : 'bg-gray-200 text-gray-500 border-gray-300 cursor-not-allowed'
-							}`}
-							title="View age-based wellness insights"
-						>
-							💡 Wellness
-						</button>
-					</div>
-				{predictedAge && (
-					<div className="text-right">
-						<p className="text-sm font-medium text-gray-900">Age: {Math.round(predictedAge)}</p>
-						<p className="text-xs text-gray-500">{ageGroup === 'child' ? 'Child' : ageGroup === 'teen' ? 'Teen' : ageGroup === 'adult' ? 'Adult' : 'Senior'}</p>
-						{/* Age-specific health focus indicator */}
-						<div className="mt-1">
-							{parentingMode && <span className="inline-block bg-pink-100 text-pink-800 text-xs px-2 py-1 rounded-full animate-pulse">👶 Parenting Mode</span>}
-							{!parentingMode && predictedAge < 13 && <span className="inline-block bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full">Building Healthy Habits</span>}
-							{!parentingMode && predictedAge >= 13 && predictedAge < 18 && <span className="inline-block bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">Growth & Development</span>}
-							{!parentingMode && predictedAge >= 18 && predictedAge < 30 && <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-1 rounded-full">Establishing Routines</span>}
-							{!parentingMode && predictedAge >= 30 && predictedAge < 50 && <span className="inline-block bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full">Maintaining Health</span>}
-							{!parentingMode && predictedAge >= 50 && <span className="inline-block bg-red-100 text-red-800 text-xs px-2 py-1 rounded-full">Wellness & Prevention</span>}
-						</div>
-						{/* Facial Analysis Indicator */}
-						<div className="mt-2">
-							<span className="inline-block bg-gradient-to-r from-blue-500 to-purple-600 text-white text-xs px-3 py-1 rounded-full animate-pulse">
-								🔍 AI Facial Analysis Active
-							</span>
-						</div>
-					</div>
-				)}
-			</header>
+			<Navbar />
 
 			{/* Main Chat Area */}
 			<main ref={mainRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-6 relative z-0">

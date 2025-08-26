@@ -356,12 +356,12 @@ return (
           {/* Controls */}
           <div className="mt-4 grid grid-cols-3 gap-4">
             {!capturedDataUrl ? (
-              <button onClick={handleCapture} className="col-span-1 bg-[#26efe9] hover:bg-[#12dcd6] text-black px-4 py-2 rounded-lg font-semibold flex items-center justify-center gap-2 disabled:opacity-50" disabled={!!errorTitle || isStarting || isPredicting}>
+              <button onClick={handleCapture} className="col-span-1 bg-[#26efe9] hover:bg-[#12dcd6] text-black px-3 py-2 md:px-4 md:py-2 rounded-lg font-semibold text-sm md:text-base flex items-center justify-center gap-2 disabled:opacity-50" disabled={!!errorTitle || isStarting || isPredicting}>
                 <span>▢</span>
                 Start Camera
               </button>
             ) : (
-              <button onClick={handleRetake} className="col-span-1 bg-[#26efe9] hover:bg-[#12dcd6] text-black px-4 py-2 rounded-lg font-semibold flex items-center justify-center gap-2 disabled:opacity-50" disabled={isStarting || isPredicting}>
+              <button onClick={handleRetake} className="col-span-1 bg-[#26efe9] hover:bg-[#12dcd6] text-black px-3 py-2 md:px-4 md:py-2 rounded-lg font-semibold text-sm md:text-base flex items-center justify-center gap-2 disabled:opacity-50" disabled={isStarting || isPredicting}>
                 <span>📵</span>
                 Stop Camera
               </button>

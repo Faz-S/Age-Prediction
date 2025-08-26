@@ -1,8 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import { useLocation, Link, useNavigate } from 'react-router-dom'
+import Navbar from '../../components/Navbar'
 import config from '../../config'
-import hero from '../../assets/hero.png'
+// import hero from '../../assets/hero.png'
 import fullHero from '../../assets/image.png'
+import heroAlt1 from '../../assets/img_1.png'
+import heroAlt2 from '../../assets/img_2.png'
+import heroAlt3 from '../../assets/img_3.png'
 
 export default function Wellness() {
   const location = useLocation()
@@ -15,6 +19,14 @@ export default function Wellness() {
   const [imageLoading, setImageLoading] = useState(false)
   const [photoDescription, setPhotoDescription] = useState('')
   const [userName, setUserName] = useState('')
+  const [heroSrc, setHeroSrc] = useState(fullHero)
+
+  // Pick a random hero image on mount
+  useEffect(() => {
+    const options = [fullHero, heroAlt1, heroAlt2, heroAlt3]
+    const idx = Math.floor(Math.random() * options.length)
+    setHeroSrc(options[idx])
+  }, [])
 
   // Proxy external images via backend to avoid CORS/referrer blocks
   const toProxy = (url) => {
@@ -313,27 +325,7 @@ export default function Wellness() {
 
   return (
     <div className="min-h-screen bg-[#fff]">
-      {/* Top Navbar (Wellness page only) */}
-      <div className="mx-auto max-w-6xl px-4 pt-4">
-        <nav className="w-full rounded-2xl border border-gray-200 bg-white">
-          <div className="flex items-center justify-between px-4 py-3">
-            {/* Left nav links */}
-            <div className="flex items-center gap-5 text-sm text-gray-800">
-              <Link to="/chatbot" className="hover:text-black">Chatbot</Link>
-              <Link to="/" className="hover:text-black">Age Prediction</Link>
-            </div>
-            {/* Center logo */}
-            <div className="text-xl md:text-2xl font-extrabold tracking-tight text-gray-900 select-none">AgeWise</div>
-            {/* Right actions */}
-            <div className="flex items-center gap-3">
-              {userName && (
-                <span className="hidden sm:inline text-sm text-gray-700">Hi, {userName.split(' ')[0]}</span>
-              )}
-              <button onClick={handleLogout} className="rounded-full bg-black text-white text-sm px-4 py-2 hover:bg-gray-900">Logout</button>
-            </div>
-          </div>
-        </nav>
-      </div>
+      <Navbar />
 
       <div className="mx-auto max-w-6xl px-6 py-10">
         {/* Top controls */}
@@ -381,7 +373,7 @@ export default function Wellness() {
           </div>
           {/* Full image directly below the subtitle, full width, no crop */}
           <div className="mt-4">
-            <img src={fullHero} alt="Wellness full hero" className="w-full h-auto object-contain rounded-xl" />
+            <img src={heroSrc} alt="Wellness full hero" className="w-full h-auto object-contain rounded-xl" />
             {photoDescription && (
               <div className="mt-3">
                 <h2 className="text-xl md:text-2xl font-bold text-gray-900 mb-1">Appearance & Wellness Insight</h2>

@@ -63,7 +63,7 @@ AGE_CLASS_LABELS = [s.strip() for s in os.environ.get("AGE_CLASS_LABELS", "Minor
 AGE_DEBUG_RESPONSE = os.environ.get("AGE_DEBUG_RESPONSE", "0").strip() in ("1", "true", "True", "yes", "on")
 
 # Gemini AI Configuration
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDxpGYSof8mp6CObcNqMSATfYs_1Hny_HM")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAbe6k8QFxrESumBrcUlCrQXKGgVymTNEg")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 mongo_client = MongoClient(MONGODB_URI)

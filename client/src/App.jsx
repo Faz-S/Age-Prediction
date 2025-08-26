@@ -6,6 +6,7 @@ import Register from './pages/Register/Register'
 import Home from './pages/Home/Home'
 import Chatbot from './pages/Chatbot/Chatbot'
 import Wellness from './pages/Wellness/Wellness'
+import Profile from './pages/Profile/Profile'
 
 function App() {
   const [authTick, setAuthTick] = useState(0)
@@ -80,6 +81,8 @@ function App() {
           <Route path="/chatbot" element={<Chatbot />} />
           <Route path="/wellness" element={<Wellness />} />
         </Route>
+        {/* Profile is available to any authenticated user */}
+        <Route path="/profile" element={<Profile />} />
       </Route>
 
       {/* Fallback */}
