@@ -56,14 +56,14 @@ JWT_EXPIRES_DAYS = int(os.environ.get("JWT_EXPIRES_DAYS", "7"))
 # Inference configuration
 AGE_MODEL_PATH = os.environ.get("AGE_MODEL_PATH", os.path.join(os.path.dirname(__file__), "best_resnet_model.keras"))
 AGE_PREPROCESS = os.environ.get("AGE_PREPROCESS", "scale01").lower()  # 'scale01' or 'imagenet'
-AGE_INPUT_SIZE = os.environ.get("AGE_INPUT_SIZE", "")  # e.g., "224,224" to override
+AGE_INPUT_SIZE = os.environ.get("AGE_INPUT_SIZE")  # e.g., "224,224" to override
 AGE_OUTPUT_MIN = float(os.environ.get("AGE_OUTPUT_MIN", "0"))
 AGE_OUTPUT_MAX = float(os.environ.get("AGE_OUTPUT_MAX", "120"))
 AGE_CLASS_LABELS = [s.strip() for s in os.environ.get("AGE_CLASS_LABELS", "Minor,Middle-aged,Senior").split(',') if s.strip()]
 AGE_DEBUG_RESPONSE = os.environ.get("AGE_DEBUG_RESPONSE", "0").strip() in ("1", "true", "True", "yes", "on")
 
 # Gemini AI Configuration
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyCs8n3CIzQZppgF04aQMP01t6oCxCsjWPs")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 mongo_client = MongoClient(MONGODB_URI)
@@ -78,11 +78,11 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Unsplash Configuration
-UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "7984UBkb0lUWtIPwV0LBtya3fIinzwah5viAplc5tdI")
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 
 # Google Custom Search (Images)
-GOOGLE_CSE_KEY = os.environ.get("GOOGLE_CSE_KEY", "AIzaSyCHkONFxUagLX0JVHClVN12LbJ7rebxIKQ").strip()
-GOOGLE_CSE_CX = os.environ.get("GOOGLE_CSE_CX", "668916677574a4f2a").strip()
+GOOGLE_CSE_KEY = os.environ.get("GOOGLE_CSE_KEY")
+GOOGLE_CSE_CX = os.environ.get("GOOGLE_CSE_CX")
 
 # --- Unsplash helpers ---
 def _is_likely_image_url(url: str) -> bool:
@@ -523,7 +523,7 @@ def generate_diet_plan():
 
     plan = None
     try:
-        api_key = (os.environ.get("GEMINI_API_KEY") or "AIzaSyAimP08yLnrGo-fgrMrOXnZkrXQFYQGWvE").strip()
+        api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("Missing GEMINI_API_KEY")
         req = {
@@ -627,7 +627,7 @@ def nearby_hospitals():
     prompt = sys_instructions + "\n\n" + user_context + "\n\n" + schema
 
     try:
-        api_key = (os.environ.get("GEMINI_API_KEY") or GEMINI_API_KEY or "").strip()
+        api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("Missing GEMINI_API_KEY")
         req = {
@@ -1944,10 +1944,5 @@ def get_facial_features(age):
 	except Exception as e:
 		app.logger.error(f"Error retrieving facial features: {e}")
 		return None
-
-
-
-
-
 if __name__ == "__main__":
 	app.run(host="127.0.0.1", port=5000, debug=True)
