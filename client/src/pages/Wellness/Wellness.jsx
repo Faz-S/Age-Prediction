@@ -20,6 +20,14 @@ export default function Wellness() {
   const [photoDescription, setPhotoDescription] = useState('')
   const [userName, setUserName] = useState('')
   const [heroSrc, setHeroSrc] = useState(fullHero)
+  // Hospitals state
+  const [hospitals, setHospitals] = useState([])
+  const [hospitalsLoading, setHospitalsLoading] = useState(false)
+  const [hospitalsError, setHospitalsError] = useState('')
+  const [cityQuery, setCityQuery] = useState('')
+  // CSE image caches
+  const [productImages, setProductImages] = useState({})
+  const [hospitalImages, setHospitalImages] = useState({})
 
   // Pick a random hero image on mount
   useEffect(() => {
@@ -27,6 +35,115 @@ export default function Wellness() {
     const idx = Math.floor(Math.random() * options.length)
     setHeroSrc(options[idx])
   }, [])
+
+  // Helper: batch fetch CSE images
+  const fetchCseImages = async (queries) => {
+    try {
+      if (!queries || !queries.length) return {}
+      const res = await fetch(config.getApiUrl('/api/cse-images'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queries })
+      })
+      if (!res.ok) return {}
+      const js = await res.json()
+      try { console.debug('[CSE] batch response', { queries, js }) } catch {}
+      return js.images || {}
+    } catch {
+      return {}
+    }
+  }
+
+  // Nearby hospitals fetcher
+  const fetchHospitals = async (opts) => {
+    try {
+      setHospitalsLoading(true)
+      setHospitalsError('')
+      const res = await fetch(config.getApiUrl('/api/nearby-hospitals'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(opts || {})
+      })
+      if (!res.ok) throw new Error('Failed to load nearby hospitals')
+      const js = await res.json()
+      setHospitals(Array.isArray(js.hospitals) ? js.hospitals : [])
+    } catch (e) {
+      setHospitalsError(e.message || 'Something went wrong')
+      setHospitals([])
+    } finally {
+      setHospitalsLoading(false)
+    }
+  }
+
+  // Try to use browser geolocation for hospitals on mount
+  useEffect(() => {
+    try {
+      if ('geolocation' in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            const { latitude, longitude } = pos.coords || {}
+            if (latitude && longitude) fetchHospitals({ lat: latitude, lon: longitude })
+          },
+          () => {
+            // Ignore denial; user can search by city
+          },
+          { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
+        )
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Fetch CSE images for products when data loads
+  useEffect(() => {
+    (async () => {
+      try {
+        const products = (data?.products || []).slice(0, 3)
+        if (!products.length) return
+        const names = products.map(p => (p?.title || p?.subtitle || '').trim()).filter(Boolean)
+        const queries = names.map(t => `${t} product`)
+        const images = await fetchCseImages(queries)
+        if (images && Object.keys(images).length) {
+          const byName = {}
+          names.forEach((name) => {
+            const q = `${name} product`
+            if (images[q]) byName[name] = images[q]
+          })
+          const mapped = {}
+          products.forEach((p) => {
+            const titleKey = (p?.title || '').trim()
+            const subKey = (p?.subtitle || '').trim()
+            if (titleKey && byName[titleKey]) mapped[titleKey] = byName[titleKey]
+            if (subKey && byName[subKey]) mapped[subKey] = byName[subKey]
+          })
+          try { console.debug('[CSE] product mapped images', mapped) } catch {}
+          setProductImages(prev => ({ ...prev, ...mapped }))
+        }
+      } catch {}
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.products])
+
+  // Fetch CSE images for hospitals whenever hospitals list changes
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!hospitals || !hospitals.length) return
+        const names = hospitals.map(h => (h?.name || '').trim()).filter(Boolean)
+        const queries = names.map(n => `${n} hospital`)
+        const images = await fetchCseImages(queries)
+        if (images && Object.keys(images).length) {
+          const mapped = {}
+          names.forEach((name, idx) => {
+            const q = queries[idx]
+            if (name && images[q]) mapped[name] = images[q]
+          })
+          try { console.debug('[CSE] hospital mapped images', mapped) } catch {}
+          setHospitalImages(prev => ({ ...prev, ...mapped }))
+        }
+      } catch {}
+    })()
+  }, [hospitals])
 
   // Proxy external images via backend to avoid CORS/referrer blocks
   const toProxy = (url) => {
@@ -421,13 +538,9 @@ export default function Wellness() {
               <article key={i} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                 <div className="aspect-[4/3] bg-gray-100">
                   <img
-                    src={toProxy(p.image)}
+                    src={toProxy(productImages[p.title] || productImages[p.subtitle] || p.image)}
                     alt={p.title}
                     className="w-full h-full object-cover"
-                    onError={(e) => {
-                      const seed = encodeURIComponent(`${p.title || 'product'}-${i}`)
-                      e.currentTarget.src = `https://picsum.photos/seed/${seed}/800/600`
-                    }}
                   />
                 </div>
                 <div className="p-4">
@@ -476,32 +589,108 @@ export default function Wellness() {
           </div>
         </section>
 
-        {/* Authorized Doctor */}
+        {/* Nearby Hospitals & Clinics */}
         <section className="mt-12">
-          <h3 className="text-xl md:text-2xl font-bold text-gray-900 mb-4">Authorized Doctor</h3>
-          {(() => {
-            const doc = getDoctorForAge(age)
-            return (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center bg-white rounded-2xl border border-gray-100 p-6">
-                <div>
-                  <h4 className="text-lg font-semibold text-gray-900">{doc.name}</h4>
-                  <p className="text-sm text-gray-600">{doc.role}</p>
-                  <p className="text-sm text-blue-700 mt-1">{doc.specialty}</p>
-                  <a
-                    href={doc.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center mt-4 px-4 py-2 rounded-lg bg-gray-100 text-gray-800 hover:bg-gray-200"
-                  >
-                    Visit Website
-                  </a>
+          <h3 className="text-xl md:text-2xl font-bold text-gray-900 mb-4">Nearby Hospitals & Clinics</h3>
+          <div className="flex flex-col md:flex-row md:items-center gap-3 mb-4">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  try {
+                    if ('geolocation' in navigator) {
+                      navigator.geolocation.getCurrentPosition((pos) => {
+                        const { latitude, longitude } = pos.coords || {}
+                        if (latitude && longitude) fetchHospitals({ lat: latitude, lon: longitude })
+                      })
+                    }
+                  } catch {}
+                }}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700"
+              >
+                Use My Location
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={cityQuery}
+                onChange={(e) => setCityQuery(e.target.value)}
+                placeholder="City, Region, Country"
+                className="w-72 rounded-lg border border-gray-300 bg-white px-3 py-2 text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <button
+                onClick={() => {
+                  if (cityQuery.trim()) {
+                    // naive parse: try commas
+                    const parts = cityQuery.split(',').map(s => s.trim()).filter(Boolean)
+                    const [city, region, country] = [parts[0] || '', parts[1] || '', parts[2] || '']
+                    fetchHospitals({ city, region, country })
+                  }
+                }}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-900 text-white text-sm hover:bg-gray-800"
+              >
+                Search
+              </button>
+            </div>
+          </div>
+          {hospitalsError && (
+            <div className="text-red-600 text-sm mb-3">{hospitalsError}</div>
+          )}
+          {hospitalsLoading ? (
+            <div className="space-y-4">
+              {[0,1,2].map(i => (
+                <div key={i} className="grid grid-cols-1 md:grid-cols-[140px_1fr] gap-4 bg-white rounded-2xl border border-gray-100 p-4 md:p-6 shadow-sm animate-pulse">
+                  <div className="w-full h-28 bg-gray-100 rounded-lg" />
+                  <div className="space-y-2">
+                    <div className="h-3 w-24 bg-gray-200 rounded" />
+                    <div className="h-5 w-2/3 bg-gray-200 rounded" />
+                    <div className="h-3 w-1/2 bg-gray-100 rounded" />
+                    <div className="h-3 w-1/3 bg-gray-100 rounded" />
+                    <div className="h-8 w-28 bg-gray-200 rounded mt-2" />
+                  </div>
                 </div>
-                <div className="rounded-xl overflow-hidden bg-gray-100">
-                  <img src={doc.image} alt={doc.name} className="w-full h-56 object-cover" />
-                </div>
-              </div>
-            )
-          })()}
+              ))}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {hospitals.map((h, idx) => (
+                <article key={idx} className="grid grid-cols-1 md:grid-cols-[140px_1fr] gap-4 bg-white rounded-2xl border border-gray-100 p-4 md:p-6 shadow-sm">
+                  <div className="w-full h-28 rounded-lg overflow-hidden bg-gray-100">
+                    <img
+                      src={toProxy(hospitalImages[h.name] || h.image)}
+                      alt={h.name}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        const seed = encodeURIComponent(`${h.name || 'hospital'}-${idx}`)
+                        e.currentTarget.src = `https://picsum.photos/seed/${seed}/400/300`
+                      }}
+                    />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">{h.category || 'Hospital'}</span>
+                    <h4 className="text-lg md:text-xl font-semibold text-gray-900">{h.name}</h4>
+                    <div className="mt-2 text-sm text-gray-700 flex items-center gap-2">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 10c0 7-9 12-9 12S3 17 3 10a9 9 0 1 1 18 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+                      <span>{h.address || 'N/A'}</span>
+                    </div>
+                    <div className="mt-1 text-sm text-gray-700 flex items-center gap-2">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.08 4.18 2 2 0 0 1 4.06 2h3a2 2 0 0 1 2 1.72c.12.81.3 1.6.54 2.36a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.72-1.06a2 2 0 0 1 2.11-.45c.76.24 1.55.42 2.36.54A2 2 0 0 1 22 16.92z"/></svg>
+                      <span>{h.phone || 'N/A'}</span>
+                    </div>
+                    <div className="mt-3">
+                      {h.website ? (
+                        <a href={h.website} target="_blank" rel="noopener noreferrer" className="inline-flex items-center px-4 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700">View Details</a>
+                      ) : (
+                        <button disabled className="inline-flex items-center px-4 py-2 rounded-lg bg-gray-200 text-gray-600 text-sm cursor-not-allowed">View Details</button>
+                      )}
+                    </div>
+                  </div>
+                </article>
+              ))}
+              {(!hospitals || hospitals.length === 0) && !hospitalsError && (
+                <div className="text-sm text-gray-600">No results yet. Use your location or search by city to find nearby hospitals.</div>
+              )}
+            </div>
+          )}
         </section>
       </div>
     </div>

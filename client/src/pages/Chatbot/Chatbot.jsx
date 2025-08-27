@@ -11,6 +11,7 @@ export default function Chatbot() {
 	const location = useLocation()
     const navigate = useNavigate()
 	const [messages, setMessages] = useState([])
+	const [conversationId, setConversationId] = useState(null)
 	const [inputValue, setInputValue] = useState('')
 	const [isTyping, setIsTyping] = useState(false)
 	const [typingText, setTypingText] = useState('')
@@ -130,6 +131,33 @@ export default function Chatbot() {
 		}
 	}, [location.state])
 
+	// Load last conversation from backend if logged in
+	useEffect(() => {
+		const token = localStorage.getItem('token')
+		if (!token) return
+		(async () => {
+			try {
+				const res = await fetch(config.getApiUrl('/api/my-chats/last'), {
+					method: 'GET',
+					headers: { Authorization: `Bearer ${token}` },
+				})
+				if (!res.ok) return
+				const data = await res.json()
+				if (data?.conversation && Array.isArray(data.conversation.messages) && data.conversation.messages.length > 0) {
+					setConversationId(data.conversation._id)
+					// Map server messages to UI format
+					const mapped = data.conversation.messages.map((m, idx) => ({
+						id: Date.now() + idx,
+						type: m.role === 'user' ? 'user' : 'ai',
+						content: m.content || '',
+						timestamp: new Date(m.ts || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+					}))
+					setMessages(mapped)
+				}
+			} catch {}
+		})()
+	}, [])
+
 	const confirmParenting = (isYes) => {
 		if (isYes) {
 			setIsParent(true)
@@ -183,7 +211,7 @@ export default function Chatbot() {
 		}
 	}, [isTyping])
 
-	const callHealthChatAPI = async (message, age, ageGroup, conversationHistory, parentingMode = false) => {
+	const callHealthChatAPI = async (message, age, ageGroup, conversationHistory, parentingMode = false, convId = null) => {
 		try {
 			const token = localStorage.getItem('token')
 			const requestBody = {
@@ -191,7 +219,8 @@ export default function Chatbot() {
 				age: age,
 				ageGroup: ageGroup,
 				conversationHistory: conversationHistory.slice(-5), // Send last 5 exchanges
-				parentingMode: parentingMode
+				parentingMode: parentingMode,
+				...(convId ? { conversationId: convId } : {}),
 			}
 			
 			console.log('Sending request to /api/health-chat:', requestBody)
@@ -213,11 +242,33 @@ export default function Chatbot() {
 			}
 
 			const data = await response.json()
-			return data.response
+			return data
 		} catch (error) {
 			console.error('Health Chat API Error:', error)
 			throw error
 		}
+	}
+
+	// New Chat: create a fresh conversation server-side and clear UI
+	const handleNewChat = async () => {
+		try {
+			const token = localStorage.getItem('token')
+			if (!token) {
+				// Not logged in: just clear local messages
+				setConversationId(null)
+				setMessages([])
+				return
+			}
+			const res = await fetch(config.getApiUrl('/api/my-chats/new'), {
+				method: 'POST',
+				headers: { Authorization: `Bearer ${token}` },
+			})
+			if (res.ok) {
+				const data = await res.json()
+				setConversationId(data.conversationId || null)
+				setMessages([])
+			}
+		} catch {}
 	}
 
 	const handleSendMessage = async () => {
@@ -272,7 +323,11 @@ export default function Chatbot() {
 
 		try {
 			// Call backend health chat API with conversation history
-			const aiResponseText = await callHealthChatAPI(userMessage.content, predictedAge, ageGroup, messages, parentingMode)
+			const apiResp = await callHealthChatAPI(userMessage.content, predictedAge, ageGroup, messages, parentingMode, conversationId)
+			const aiResponseText = apiResp?.response || ''
+			if (apiResp?.conversationId && apiResp.conversationId !== conversationId) {
+				setConversationId(apiResp.conversationId)
+			}
 			
 			// Add to conversation history for topic tracking
 			addToConversationHistory(userMessage.content, aiResponseText);
@@ -455,6 +510,11 @@ export default function Chatbot() {
 
 			{/* Main Chat Area */}
 			<main ref={mainRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-6 relative z-0">
+				{/* Top actions */}
+				<div className="flex items-center justify-between">
+					<div />
+					<button onClick={handleNewChat} className="text-xs px-3 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200">New Chat</button>
+				</div>
 				<AnimatePresence>
 					{messages.map((message) => (
 						<motion.div

@@ -63,16 +63,26 @@ AGE_CLASS_LABELS = [s.strip() for s in os.environ.get("AGE_CLASS_LABELS", "Minor
 AGE_DEBUG_RESPONSE = os.environ.get("AGE_DEBUG_RESPONSE", "0").strip() in ("1", "true", "True", "yes", "on")
 
 # Gemini AI Configuration
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAbe6k8QFxrESumBrcUlCrQXKGgVymTNEg")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyCs8n3CIzQZppgF04aQMP01t6oCxCsjWPs")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 mongo_client = MongoClient(MONGODB_URI)
 db = mongo_client["age_app"]
 users_col = db["users"]
 users_col.create_index("email", unique=True)
+conversations_col = db["conversations"]
+conversations_col.create_index([("userId", 1), ("updatedAt", -1)])
+
+# Uploads directory for profile photos
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Unsplash Configuration
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "7984UBkb0lUWtIPwV0LBtya3fIinzwah5viAplc5tdI")
+
+# Google Custom Search (Images)
+GOOGLE_CSE_KEY = os.environ.get("GOOGLE_CSE_KEY", "AIzaSyCHkONFxUagLX0JVHClVN12LbJ7rebxIKQ").strip()
+GOOGLE_CSE_CX = os.environ.get("GOOGLE_CSE_CX", "668916677574a4f2a").strip()
 
 # --- Unsplash helpers ---
 def _is_likely_image_url(url: str) -> bool:
@@ -299,6 +309,473 @@ def me():
         return jsonify({"message": "Invalid token"}), 401
 
 
+# --- Static route for uploaded files ---
+@app.get("/uploads/<path:filename>")
+def serve_upload(filename):
+    try:
+        return send_from_directory(UPLOAD_DIR, filename)
+    except Exception:
+        return jsonify({"message": "Not found"}), 404
+
+
+# --- Profile Endpoints ---
+@app.get("/api/profile")
+def get_profile():
+    user_id = _get_auth_user_id()
+    if not user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+    doc = users_col.find_one({"_id": ObjectId(user_id)}, projection={"password": False})
+    if not doc:
+        return jsonify({"message": "User not found"}), 404
+    profile = {
+        "name": doc.get("name") or doc.get("fullName") or "",
+        "email": doc.get("email") or "",
+        "gender": doc.get("gender") or "",
+        "height": (doc.get("profile", {}) or {}).get("height"),
+        "weight": (doc.get("profile", {}) or {}).get("weight"),
+        "avatarUrl": (doc.get("profile", {}) or {}).get("avatarUrl") or doc.get("avatarUrl"),
+        "notes": (doc.get("profile", {}) or {}).get("notes", ""),
+        "medications": (doc.get("profile", {}) or {}).get("medications", []),
+        "diet": (doc.get("profile", {}) or {}).get("diet", ""),
+    }
+    return jsonify({"profile": profile}), 200
+
+
+@app.post("/api/profile")
+def update_profile():
+    user_id = _get_auth_user_id()
+    if not user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    updates = {}
+    # Allow updating subset of fields
+    profile_updates = {}
+    if "height" in payload:
+        try:
+            profile_updates["height"] = float(payload.get("height"))
+        except Exception:
+            pass
+    if "weight" in payload:
+        try:
+            profile_updates["weight"] = float(payload.get("weight"))
+        except Exception:
+            pass
+    if "name" in payload and isinstance(payload.get("name"), str):
+        updates["name"] = payload.get("name").strip()
+    if "gender" in payload and isinstance(payload.get("gender"), str):
+        updates["gender"] = payload.get("gender").strip()
+
+    if profile_updates:
+        # If values are NaN or invalid, treat as None to unset
+        updates["profile.height"] = profile_updates.get("height", None)
+        updates["profile.weight"] = profile_updates.get("weight", None)
+
+    # Optional free-text fields
+    if "notes" in payload:
+        notes_val = payload.get("notes")
+        if isinstance(notes_val, str):
+            updates["profile.notes"] = notes_val
+        elif notes_val is None:
+            updates["profile.notes"] = None
+
+    if "diet" in payload:
+        diet_val = payload.get("diet")
+        if isinstance(diet_val, str):
+            updates["profile.diet"] = diet_val
+        elif diet_val is None:
+            updates["profile.diet"] = None
+
+    # Medications: expect array of objects with name, dose, schedule
+    if "medications" in payload:
+        meds = payload.get("medications")
+        if isinstance(meds, list):
+            # sanitize each item
+            safe_meds = []
+            for m in meds:
+                if not isinstance(m, dict):
+                    continue
+                name = str(m.get("name", "")).strip()
+                dose = str(m.get("dose", "")).strip()
+                schedule = str(m.get("schedule", "")).strip()
+                if name or dose or schedule:
+                    safe_meds.append({"name": name, "dose": dose, "schedule": schedule})
+            updates["profile.medications"] = safe_meds
+        elif meds is None:
+            updates["profile.medications"] = None
+
+    if not updates:
+        return jsonify({"message": "No changes"}), 400
+
+    # Clean None values correctly using $unset
+    set_updates = {k: v for k, v in updates.items() if v is not None}
+    unset_updates = {k: "" for k, v in updates.items() if v is None}
+    update_doc = {}
+    if set_updates:
+        update_doc["$set"] = set_updates
+    if unset_updates:
+        update_doc["$unset"] = unset_updates
+
+    users_col.update_one({"_id": ObjectId(user_id)}, update_doc)
+    return jsonify({"message": "Updated"}), 200
+
+
+@app.post("/api/diet-plan")
+def generate_diet_plan():
+    """Generate a personalized diet plan using Gemini with age/BMI context and save to profile."""
+    user_id = _get_auth_user_id()
+    if not user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    # Parse inputs
+    def to_float(v):
+        try:
+            if v is None or v == "":
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    age = data.get("age")
+    try:
+        age = int(float(age)) if age is not None and str(age).strip() != "" else None
+    except Exception:
+        age = None
+
+    height = to_float(data.get("height"))  # cm
+    weight = to_float(data.get("weight"))  # kg
+    bmi = to_float(data.get("bmi"))
+    gender = (data.get("gender") or "").strip()
+    notes = (data.get("notes") or "").strip()
+    medications = data.get("medications") if isinstance(data.get("medications"), list) else []
+
+    # Fallback to stored profile values
+    if height is None or weight is None or bmi is None:
+        doc = users_col.find_one({"_id": ObjectId(user_id)}, {"profile": 1})
+        prof = (doc or {}).get("profile", {}) if doc else {}
+        if height is None:
+            height = to_float(prof.get("height"))
+        if weight is None:
+            weight = to_float(prof.get("weight"))
+        # If age not provided, try to infer from stored predictedAge is not in DB; keep None
+
+    # Compute BMI if possible
+    if bmi is None and height and weight:
+        m = height / 100.0
+        if m > 0:
+            bmi = round(weight / (m * m), 2)
+
+    # Determine BMI band
+    def bmi_band(v):
+        if v is None:
+            return "unknown"
+        if v < 18.5:
+            return "underweight"
+        if v < 25:
+            return "normal"
+        if v < 30:
+            return "overweight"
+        return "obese"
+
+    band = bmi_band(bmi)
+
+    # Age bucket
+    if age is None:
+        age_bucket = "adult"
+    elif age < 18:
+        age_bucket = "teen"
+    elif age < 40:
+        age_bucket = "young_adult"
+    elif age < 60:
+        age_bucket = "middle_aged"
+    else:
+        age_bucket = "senior"
+
+    # Validate required inputs (age, height, weight)
+    if age is None or height is None or weight is None:
+        return jsonify({"message": "Please fill in Age, Height, and Weight before generating a diet plan."}), 400
+
+    # Build Gemini prompt
+    meds_text = "\n".join([f"- {m.get('name','')} {m.get('dose','')} {m.get('schedule','')}" for m in medications if isinstance(m, dict)])
+    header = f"Age: {age if age is not None else '—'} | Gender: {gender or '—'} | Height(cm): {height if height is not None else '—'} | Weight(kg): {weight if weight is not None else '—'} | BMI: {bmi if bmi is not None else '—'} ({band})"
+    sys_instructions = (
+        "You are a registered dietitian. Create a concise, actionable 7-day diet plan (3 meals + 1 snack/day) tailored to the user's context. "
+        "Include portion guidance and brief rationale. Avoid medical claims. If inputs are missing, make safe assumptions and state them briefly. "
+        "Use Indian cuisine dishes and ingredients (e.g., roti/chapati, dal, sabzi, curd, brown rice, khichdi, poha, upma, idli, dosa, sambar; for non-veg: egg bhurji, chicken curry, fish curry). "
+        "Use familiar Indian portion units (e.g., 1 roti ~30g atta, 1 katori ~150 ml, 1 bowl ~200 ml) and keep spice levels moderate by default. "
+        "Provide regional flexibility (veg/non-veg) where relevant. "
+        "End with 5 general tips. Format clearly with headings and bullet points."
+    )
+    user_context = (
+        f"Context\n{header}\n\nMedications (if any):\n{meds_text or '- none'}\n\nNotes: {notes or '-'}\n"
+    )
+    prompt = sys_instructions + "\n\n" + user_context + "\n\n" + (
+        "Output strictly as minified JSON with this schema: {\n"
+        "  \"overview\": string,\n"
+        "  \"bmi\": { \"value\": number, \"band\": string },\n"
+        "  \"days\": [\n"
+        "    { \"day\": string, \"breakfast\": string, \"lunch\": string, \"snack\": string, \"dinner\": string }\n"
+        "  ],\n"
+        "  \"tips\": [string]\n"
+        "}\n"
+        "Do not include any extra text, markdown, or explanations."
+    )
+
+    plan = None
+    try:
+        api_key = (os.environ.get("GEMINI_API_KEY") or "AIzaSyAimP08yLnrGo-fgrMrOXnZkrXQFYQGWvE").strip()
+        if not api_key:
+            raise RuntimeError("Missing GEMINI_API_KEY")
+        req = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.5,
+                "topP": 0.9,
+                "topK": 40,
+                "maxOutputTokens": 1200,
+                "responseMimeType": "application/json",
+            },
+        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        r = requests.post(url, json=req, timeout=25)
+        err_text = None
+        try:
+            r.raise_for_status()
+        except Exception as http_err:
+            # capture API error body for client
+            err_text = r.text
+            raise
+        js = r.json() or {}
+        # Extract JSON text from Gemini
+        plan_json_text = (
+            js.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text")
+        )
+    except Exception as e:
+        app.logger.exception("Gemini diet generation failed")
+        plan_json_text = None
+        err_msg = str(e)
+        # Return error details if we captured response text
+        return jsonify({"message": "Diet plan generation failed.", "error": err_msg, "provider": "gemini"}), 502
+
+    # If Gemini failed, return error (no manual plan)
+    if not plan_json_text:
+        return jsonify({"message": "Diet plan generation failed.", "provider": "gemini"}), 502
+
+    # Persist in profile
+    users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {"profile.dietJson": plan_json_text, "profile.diet": None}})
+
+    return jsonify({"planJson": plan_json_text, "bmi": bmi, "band": band}), 200
+
+
+@app.post("/api/nearby-hospitals")
+def nearby_hospitals():
+    """Return a Gemini-generated list of nearby hospitals/clinics given a user location.
+    Request JSON: { lat?: number, lon?: number, city?: string, region?: string, country?: string }
+    Response: { hospitals: [{ category, name, address, phone, website?, image? }] }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+    except Exception:
+        data = {}
+
+    lat = data.get("lat")
+    lon = data.get("lon")
+    city = (data.get("city") or "").strip()
+    region = (data.get("region") or "").strip()
+    country = (data.get("country") or "").strip()
+
+    # Build location string
+    loc_parts = []
+    if city: loc_parts.append(city)
+    if region: loc_parts.append(region)
+    if country: loc_parts.append(country)
+    loc_label = ", ".join(loc_parts) if loc_parts else None
+    coords_label = f"{lat},{lon}" if (lat is not None and lon is not None) else None
+
+    if not loc_label and not coords_label:
+        return jsonify({"message": "Provide at least city/region/country or lat/lon."}), 400
+
+    # Compose prompt
+    sys_instructions = (
+        "You are a helpful healthcare directory assistant. Based on the provided location, "
+        "list reputable nearby hospitals or clinics users can contact for general medical needs. "
+        "Return only places that typically accept walk-ins or appointments."
+    )
+    user_context = (
+        f"Location: {loc_label or ''}\n"
+        f"Coordinates: {coords_label or ''}\n"
+        "Return 3-6 options spanning different facility types if available (general hospital, medical center, children's hospital, multi-specialty clinic)."
+    )
+    schema = (
+        "Output strictly as minified JSON with this schema: {\n"
+        "  \"hospitals\": [\n"
+        "    { \"category\": string, \"name\": string, \"address\": string, \"phone\": string, \"website\": string, \"image\": string }\n"
+        "  ]\n"
+        "}\n"
+        "Do not include any extra text, markdown, or explanations. Use plausible contact numbers and addresses; if unsure, write 'N/A'."
+    )
+    prompt = sys_instructions + "\n\n" + user_context + "\n\n" + schema
+
+    try:
+        api_key = (os.environ.get("GEMINI_API_KEY") or GEMINI_API_KEY or "").strip()
+        if not api_key:
+            raise RuntimeError("Missing GEMINI_API_KEY")
+        req = {
+            "contents": [
+                {"role": "user", "parts": [{"text": prompt}]} 
+            ],
+            "generationConfig": {
+                "temperature": 0.3,
+                "topP": 0.9,
+                "topK": 40,
+                "maxOutputTokens": 800,
+                "responseMimeType": "application/json",
+            },
+        }
+        url = f"{GEMINI_API_URL}?key={api_key}"
+        r = requests.post(url, json=req, timeout=20)
+        r.raise_for_status()
+        js = r.json() or {}
+        text = (
+            js.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text")
+        )
+        if not text:
+            return jsonify({"message": "Failed to generate hospitals.", "provider": "gemini"}), 502
+        # Ensure the response is valid JSON
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            # Attempt to strip code fences if present
+            text2 = text.strip().strip('`')
+            parsed = json.loads(text2)
+        return jsonify(parsed), 200
+    except Exception as e:
+        app.logger.exception("Gemini hospitals generation failed")
+        return jsonify({"message": "Hospitals generation failed.", "error": str(e), "provider": "gemini"}), 502
+
+
+@app.post("/api/profile/avatar")
+def upload_avatar():
+    user_id = _get_auth_user_id()
+    if not user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+    if "avatar" not in request.files:
+        return jsonify({"message": "No file"}), 400
+    f = request.files["avatar"]
+    if not f.filename:
+        return jsonify({"message": "Invalid file"}), 400
+    # Sanitize extension
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg"
+    safe_name = f"avatar_{user_id}_{int(datetime.utcnow().timestamp())}{ext}"
+    path = os.path.join(UPLOAD_DIR, safe_name)
+    try:
+        f.save(path)
+        url_path = f"/uploads/{safe_name}"
+        users_col.update_one({"_id": ObjectId(user_id)}, {"$set": {"profile.avatarUrl": url_path}})
+        return jsonify({"avatarUrl": url_path}), 200
+    except Exception as e:
+        app.logger.exception("Avatar upload failed")
+        return jsonify({"message": "Upload failed"}), 500
+
+
+# --- Conversations API ---
+@app.post("/api/my-chats/new")
+def create_conversation():
+    user_id = _get_auth_user_id()
+    if not user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+    now = datetime.utcnow()
+    doc = {
+        "userId": ObjectId(user_id),
+        "title": "New chat",
+        "messages": [],
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    res = conversations_col.insert_one(doc)
+    return jsonify({"conversationId": str(res.inserted_id)}), 201
+
+
+@app.get("/api/my-chats/last")
+def get_last_conversation():
+    user_id = _get_auth_user_id()
+    if not user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+    doc = conversations_col.find_one({"userId": ObjectId(user_id)}, sort=[("updatedAt", -1)])
+    if not doc:
+        return jsonify({"conversation": None}), 200
+    conv = {
+        "_id": str(doc.get("_id")),
+        "title": doc.get("title", ""),
+        "createdAt": doc.get("createdAt"),
+        "updatedAt": doc.get("updatedAt"),
+        "messages": [
+            {"role": m.get("role"), "content": m.get("content"), "ts": m.get("ts")}
+            for m in (doc.get("messages") or [])
+        ][-100:],
+    }
+    return jsonify({"conversation": conv}), 200
+
+
+@app.get("/api/my-chats")
+def list_conversations():
+    user_id = _get_auth_user_id()
+    if not user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+    try:
+        limit = max(1, min(50, int(request.args.get("limit", 20))))
+    except Exception:
+        limit = 20
+    items = []
+    for d in conversations_col.find({"userId": ObjectId(user_id)}, projection={"messages": False}).sort("updatedAt", -1).limit(limit):
+        items.append({
+            "_id": str(d.get("_id")),
+            "title": d.get("title", ""),
+            "createdAt": d.get("createdAt"),
+            "updatedAt": d.get("updatedAt"),
+        })
+    return jsonify({"conversations": items}), 200
+
+
+@app.get("/api/my-chats/<conv_id>")
+def get_conversation(conv_id):
+    user_id = _get_auth_user_id()
+    if not user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+    try:
+        doc = conversations_col.find_one({"_id": ObjectId(conv_id), "userId": ObjectId(user_id)})
+    except Exception:
+        return jsonify({"message": "Not found"}), 404
+    if not doc:
+        return jsonify({"message": "Not found"}), 404
+    conv = {
+        "_id": str(doc.get("_id")),
+        "title": doc.get("title", ""),
+        "createdAt": doc.get("createdAt"),
+        "updatedAt": doc.get("updatedAt"),
+        "messages": [
+            {"role": m.get("role"), "content": m.get("content"), "ts": m.get("ts")}
+            for m in (doc.get("messages") or [])
+        ][-200:],
+    }
+    return jsonify({"conversation": conv}), 200
+
+
 @app.get("/api/age-images")
 def age_images():
 	try:
@@ -313,7 +790,76 @@ def age_images():
 		image_url = f"https://picsum.photos/seed/wellness-{bucket}/1200/400"
 		return jsonify({"image": image_url}), 200
 	except Exception:
-		return jsonify({"image": ""}), 200
+		        return jsonify({"image": ""}), 200
+
+
+@app.get("/api/proxy-image")
+def proxy_image():
+    """Proxy an external image URL to avoid CORS/referrer issues.
+    Usage: /api/proxy-image?url=https%3A%2F%2F...
+    """
+    try:
+        url = request.args.get("url", "").strip()
+        if not url or not (url.startswith("http://") or url.startswith("https://")):
+            return jsonify({"message": "Invalid url"}), 400
+        r = requests.get(url, timeout=8)
+        if not r.ok:
+            return jsonify({"message": "Fetch failed"}), 502
+        # Infer content type, fallback to image/jpeg
+        ctype = r.headers.get("Content-Type", "image/jpeg")
+        return Response(r.content, content_type=ctype)
+    except Exception:
+        return jsonify({"message": "Proxy error"}), 502
+
+
+def _google_cse_first_image(query: str) -> str:
+    """Return first image URL from Google CSE image search. Empty string if not configured or error."""
+    try:
+        key = (GOOGLE_CSE_KEY or os.environ.get("GOOGLE_CSE_KEY", "AIzaSyCHkONFxUagLX0JVHClVN12LbJ7rebxIKQ")).strip()
+        cx = (GOOGLE_CSE_CX or os.environ.get("GOOGLE_CSE_CX", "668916677574a4f2a")).strip()
+        if not key or not cx or not query:
+            return ""
+        params = {"key": key, "cx": cx, "q": query, "searchType": "image", "num": 1, "safe": "active"}
+        r = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=8)
+        if not r.ok:
+            return ""
+        js = r.json() or {}
+        items = js.get("items", []) or []
+        if not items:
+            return ""
+        link = items[0].get("link") or items[0].get("linkUrl") or ""
+        return link or ""
+    except Exception:
+        return ""
+
+
+@app.get("/api/cse-image")
+def cse_image():
+    """Return first image URL for query using Google CSE. Response: {image: string}"""
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"image": ""}), 200
+    img = _google_cse_first_image(q)
+    return jsonify({"image": img}), 200
+
+
+@app.post("/api/cse-images")
+def cse_images():
+    """Batch image search. Body: {queries: [string]} -> {images: {query: url}}"""
+    data = request.get_json(silent=True) or {}
+    queries = data.get("queries") or []
+    if not isinstance(queries, list):
+        return jsonify({"images": {}}), 200
+    out = {}
+    for q in queries[:10]:  # cap to avoid abuse
+        try:
+            qs = str(q).strip()
+            if not qs:
+                continue
+            out[qs] = _google_cse_first_image(qs)
+        except Exception:
+            out[str(q)] = ""
+    return jsonify({"images": out}), 200
 
 
 @app.post("/api/predict-age")
@@ -953,7 +1499,7 @@ FACIAL FEATURE INSIGHTS:
 SAFETY GUIDELINES:
 {safety_guidelines}
 
-RESPONSE REQUIREMENTS:
+RESPONSE REQUIREMENTS (be concise):
 1. ONLY respond to health-related topics - if the question is NOT health-related, politely redirect to health topics
 2. Provide direct, personalized answers to their specific health question
 3. Consider their age and facial development stage when relevant
@@ -966,7 +1512,7 @@ RESPONSE REQUIREMENTS:
 10. Vary your response style - don't always follow the same structure
 11. {"In PARENTING MODE: Focus on child development, nutrition, activities, safety, and parenting challenges. Provide practical, evidence-based advice for raising healthy children." if parenting_mode else ""}
 
-IMPORTANT: 
+IMPORTANT (style):
 - Don't always give tips unless specifically requested
 - Don't repeat the same format every time
 - Focus on answering their question directly
@@ -975,11 +1521,47 @@ IMPORTANT:
 - If this is a repetitive topic, acknowledge it briefly and provide new insights or different angles
 - Use the conversation history to provide continuity without repetition
 
+CONCISENESS:
+- Keep the response brief: 3–6 short sentences, ideally under 120 words.
+- If listing steps, use max 3 bullets, each very short.
+
 USER QUESTION: "{user_message}"
 
-Provide a direct, helpful response to their health question. Be conversational and natural. Don't force a rigid format or always include tips. If this topic was discussed before, acknowledge it briefly and offer new perspectives."""
+Provide a direct, helpful response to their health question. Be conversational and natural. Keep it concise as instructed above. If this topic was discussed before, acknowledge it briefly and offer new perspectives."""
 
 		app.logger.info(f"Generated prompt for age {user_age}, age group {age_group}")
+
+		# If authenticated, manage conversation persistence
+		conversation_id = (request.get_json(silent=True) or {}).get("conversationId")
+		authed_user_id = _get_auth_user_id()
+
+		# Prepare persistence operations if user is authenticated
+		conv_doc = None
+		if authed_user_id:
+			now = datetime.utcnow()
+			user_obj_id = ObjectId(authed_user_id)
+			try:
+				if conversation_id:
+					conv_doc = conversations_col.find_one({"_id": ObjectId(conversation_id), "userId": user_obj_id})
+				if not conv_doc:
+					# Create a new conversation using first user message as title
+					title = (user_message[:60] + '…') if len(user_message) > 60 else (user_message or "New chat")
+					res = conversations_col.insert_one({
+						"userId": user_obj_id,
+						"title": title or "New chat",
+						"messages": [],
+						"createdAt": now,
+						"updatedAt": now,
+					})
+					conversation_id = str(res.inserted_id)
+					conv_doc = conversations_col.find_one({"_id": ObjectId(conversation_id)})
+				# Append the user message
+				conversations_col.update_one(
+					{"_id": conv_doc["_id"]},
+					{"$push": {"messages": {"role": "user", "content": user_message, "ts": now}}, "$set": {"updatedAt": now}}
+				)
+			except Exception:
+				pass
 
 		# Call Gemini API
 		headers = {
@@ -1055,16 +1637,45 @@ Provide a direct, helpful response to their health question. Be conversational a
 		cleaned_response = clean_markdown(generated_text)
 		app.logger.info(f"Successfully generated response for user age {user_age}")
 		
+		# Persist AI response if conversation exists
+		if authed_user_id and conversation_id:
+			try:
+				now2 = datetime.utcnow()
+				conversations_col.update_one(
+					{"_id": ObjectId(conversation_id), "userId": ObjectId(authed_user_id)},
+					{"$push": {"messages": {"role": "ai", "content": cleaned_response, "ts": now2}}, "$set": {"updatedAt": now2}}
+				)
+			except Exception:
+				pass
+
 		return jsonify({
 			"response": cleaned_response,
 			"age": user_age,
-			"ageGroup": age_group
+			"ageGroup": age_group,
+			"conversationId": conversation_id
 		}), 200
 
 	except Exception as e:
 		app.logger.exception("Health chat error")
 		return jsonify({"message": "Internal server error"}), 500
 
+def _get_auth_user_id():
+    """Extract user ObjectId from Authorization header if present and valid.
+    Returns (user_id_str) or None.
+    """
+    try:
+        auth_header = request.headers.get("Authorization") or ""
+        if not auth_header.startswith("Bearer "):
+            return None
+        token = auth_header[len("Bearer "):].strip()
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        user_id = payload.get("sub")
+        # Basic validation of ObjectId format
+        if user_id:
+            return user_id
+    except Exception:
+        return None
+    return None
 
 # New: Age-based Wellness content
 @app.post("/api/age-wellness")
